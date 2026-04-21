@@ -9,14 +9,14 @@ export default function App() {
     const url = `ws://${window.location.host}/ws/`;
     const ws = new WebSocket(url);
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "echo_ping", payload: { ts: Date.now() } }));
+      ws.send(JSON.stringify({ type: "echo_ping", data: { ts: Date.now() } }));
     };
     ws.onmessage = (ev) => {
       try {
         const frame = JSON.parse(ev.data);
         if (frame && frame.type === "echo_pong") {
           setEcho("pong");
-          console.log("[echo_pong]", frame.payload);
+          console.log("[echo_pong]", frame.data);
         }
       } catch {
         setEcho("error");

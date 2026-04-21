@@ -1,0 +1,26 @@
+version: "1.0"
+namespace: app.relay
+
+entries:
+  # Echo relay plugin — structural template that the Phase 2 game_ plugin
+  # will inherit via copy-rename (D-10).
+  #
+  # Discovered by wippy/relay at boot via registry.find({kind=process.*,
+  # meta.type=relay.plugin}) and auto-spawned per user-hub because
+  # meta.auto_start: true.
+  #
+  # Frames with `type` starting with "echo_" (e.g. "echo_ping") are
+  # dispatched here by the user hub. The hub strips the command_prefix
+  # before sending to this plugin's inbox, so this plugin sees topic
+  # "ping" (not "echo_ping") with payload {conn_pid, type, data, ...}.
+  - name: echo_plugin
+    kind: process.lua
+    meta:
+      type: relay.plugin
+      command_prefix: echo_
+      auto_start: true
+    source: file://echo_plugin.lua
+    method: run
+    modules:
+      - json
+      - logger
