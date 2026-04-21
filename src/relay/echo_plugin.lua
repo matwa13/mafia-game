@@ -52,12 +52,12 @@ local function run(args)
             if topic == "ping" then
                 -- command_prefix "echo_" stripped → incoming topic is "ping"
                 local conn_pid = payload and payload.conn_pid
-                if not conn_pid then
-                    logger:warn("ping without conn_pid; dropping")
+                if type(conn_pid) ~= "string" then
+                    logger:warn("ping without string conn_pid; dropping")
                 else
                     -- Track connection bookkeeping (first sighting of this conn_pid).
-                    if not conns[tostring(conn_pid)] then
-                        conns[tostring(conn_pid)] = { joined_at = os.time() }
+                    if not conns[conn_pid] then
+                        conns[conn_pid] = { joined_at = os.time() }
                     end
 
                     -- Echo back. The websocket_relay middleware serializes

@@ -40,7 +40,7 @@ local function run(_args)
 
             if topic == "ping" then
                 local from = payload and payload.from
-                if from then
+                if type(from) == "string" then
                     process.send(from, "pong", { from = process.pid() })
                 end
             end

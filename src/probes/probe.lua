@@ -256,7 +256,7 @@ local function run(_args)
     probe_registry_xprocess()
     probe_echo()
 
-    if db then
+    if db ~= nil then
         db:release()
     end
 
