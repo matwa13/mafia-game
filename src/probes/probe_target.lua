@@ -13,6 +13,14 @@ local function run(_args)
     local inbox = process.inbox()
     local events = process.events()
 
+    -- Register by name so the probe process can resolve us via
+    -- process.registry.lookup(). The process.service wrapper does not
+    -- auto-register the entry ID — only explicit registry.register does.
+    local reg_ok, reg_err = process.registry.register("app.probes:probe_target")
+    if not reg_ok then
+        logger:warn("[probe_target] registry.register failed", { error = tostring(reg_err) })
+    end
+
     logger:info("[probe_target] started")
 
     while true do
