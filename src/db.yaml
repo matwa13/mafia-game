@@ -1,5 +1,5 @@
 version: "1.0"
-namespace: app.storage
+namespace: app
 
 entries:
   - name: db

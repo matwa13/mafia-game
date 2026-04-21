@@ -6,7 +6,7 @@ entries:
     kind: function.lua
     meta:
       type: migration
-      target_db: app.storage:db
+      target_db: app:db
       description: Create initial Mafia schema (all 8 tables)
       depends_on: [ns:wippy.migration]
       timestamp: "2026-04-21T12:00:00Z"

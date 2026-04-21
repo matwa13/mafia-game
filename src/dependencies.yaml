@@ -1,0 +1,27 @@
+version: "1.0"
+namespace: app
+
+entries:
+  # Bootloader runs the discovery-and-execute service at order 20
+  # that picks up every `meta.type: migration` entry in the registry
+  # and applies it against the target database.
+  - name: dep.bootloader
+    kind: ns.dependency
+    component: wippy/bootloader
+    version: "*"
+    parameters:
+      - name: application_host
+        value: app.processes:host
+      - name: env_storage
+        value: app:env
+
+  # Binds the `app_db` parameter of the wippy/migration module to our
+  # SQLite database entry so the migration bootloader knows which db
+  # to run 0001_initial_schema against.
+  - name: dep.migration
+    kind: ns.dependency
+    component: wippy/migration
+    version: "*"
+    parameters:
+      - name: app_db
+        value: app:db
