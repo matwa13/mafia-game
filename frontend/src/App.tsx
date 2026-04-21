@@ -13,8 +13,10 @@ export default function App() {
     };
     ws.onmessage = (ev) => {
       try {
+        // websocket_relay wraps outbound process.send(client_pid, topic, payload)
+        // as a text frame shaped {topic, data: payload}. Match on frame.topic.
         const frame = JSON.parse(ev.data);
-        if (frame && frame.type === "echo_pong") {
+        if (frame && frame.topic === "echo_pong") {
           setEcho("pong");
           console.log("[echo_pong]", frame.data);
         }

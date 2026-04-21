@@ -13,9 +13,10 @@
 --   → for each "echo_*" frame, user hub strips the prefix and sends us:
 --       topic = "ping"  (post-strip)
 --       payload = { conn_pid, type = "echo_ping", data = {...}, ... }
---   → we reply with process.send(conn_pid, "ws.send", {type=..., data=...})
+--   → we reply with process.send(conn_pid, "echo_pong", {...data object...})
+--     which the middleware wraps as `{"topic":"echo_pong","data":{...}}`
+--     text frame to the browser.
 
-local json = require("json")
 local logger = require("logger"):named("echo_plugin")
 
 local function run(args)
@@ -59,16 +60,15 @@ local function run(args)
                         conns[tostring(conn_pid)] = { joined_at = os.time() }
                     end
 
-                    -- Echo back. Use ws.send (the topic websocket_relay listens
-                    -- for on the client PID) with the full type string echo_pong.
+                    -- Echo back. The websocket_relay middleware serializes
+                    -- outbound `process.send(client_pid, topic, payload)`
+                    -- as a text frame shaped `{"topic": <topic>, "data":
+                    -- <payload>}`. So we use topic = "echo_pong" (full
+                    -- type string) and payload = the data object only.
                     local client_ts = payload.data and payload.data.ts
-                    local reply = {
-                        type = "echo_pong",
-                        data = { ts = client_ts, echoed = true },
-                    }
-                    process.send(conn_pid, "ws.send", {
-                        type = "text",
-                        data = json.encode(reply),
+                    process.send(conn_pid, "echo_pong", {
+                        ts = client_ts,
+                        echoed = true,
                     })
 
                     if not first_ping_logged then

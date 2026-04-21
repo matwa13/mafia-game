@@ -22,5 +22,4 @@ entries:
     source: file://echo_plugin.lua
     method: run
     modules:
-      - json
       - logger
