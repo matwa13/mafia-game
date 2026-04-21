@@ -9,7 +9,7 @@ entries:
       - logger
       - time
       - sql
-      - json
+      - env
     method: run
 
   - name: test_driver_service
