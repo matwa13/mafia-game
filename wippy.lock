@@ -1,3 +1,7 @@
 directories:
     modules: .wippy
     src: ./src
+modules:
+    - name: wippy/migration
+      version: 0.3.15
+      hash: b675a9dd0bf83a48ecb696cc27ec7a9173e54c3431da89121d865751e26330d0
