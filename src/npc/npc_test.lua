@@ -222,7 +222,7 @@ end
 --- This is one of only TWO intentional panic sites (the other is D-11
 --- in visible_context).
 local function assert_stable_hash(state)
-    local now_bytes = persona.render_stable_block(persona.FIXTURE, state.role)
+    local now_bytes = tostring(persona.render_stable_block(persona.FIXTURE, state.role))
     local now_hash = hash.sha256(now_bytes)
     assert(now_hash == state.stable_hash,
         string.format("PERSONA DRIFT: npc=%s boot_hash=%s now_hash=%s",
@@ -250,20 +250,26 @@ local function handle_speak(state, payload)
     assert_stable_hash(state)
     local p = build_chat_prompt(state)
 
+    local force_error, reply_to, error_type
+    for k, v in pairs(payload) do
+        if k == "force_error" then force_error = v end
+        if k == "reply_to"    then reply_to    = v end
+        if k == "error_type"  then error_type  = v end
+    end
+
     local call_fn
-    if payload.force_error == true then
-        call_fn = forced_error_fn(payload)
+    if force_error == true then
+        call_fn = forced_error_fn({ error_type = error_type })
     else
         call_fn = function() return call_chat_stream(p) end
     end
 
     local text, err = with_retry("chat", call_fn)
-    local reply_to = payload.reply_to
     if err or not text or text == "" then
         local reason = classify(err).reason
         pe.publish_event("system", "npc_turn_skipped",
             "/game/test/npc/" .. NPC_ID, { npc_id = NPC_ID, reason = reason })
-        if reply_to then
+        if type(reply_to) == "string" then
             process.send(reply_to, "npc_turn_skipped_ack",
                 { npc_id = NPC_ID, reason = reason })
         end
@@ -271,7 +277,7 @@ local function handle_speak(state, payload)
     end
     pe.publish_event("public", "npc.message",
         "/game/test/round/1", { npc_id = NPC_ID, text = text })
-    if reply_to then
+    if type(reply_to) == "string" then
         process.send(reply_to, "npc_message_done",
             { npc_id = NPC_ID, text = text })
     end
@@ -282,21 +288,34 @@ local function handle_vote(state, payload)
     assert_stable_hash(state)
     local p = build_vote_prompt(state)
 
+    local force_error, reply_to, error_type
+    for k, v in pairs(payload) do
+        if k == "force_error" then force_error = v end
+        if k == "reply_to"    then reply_to    = v end
+        if k == "error_type"  then error_type  = v end
+    end
+
     local call_fn
-    if payload.force_error == true then
-        call_fn = forced_error_fn(payload)
+    if force_error == true then
+        call_fn = forced_error_fn({ error_type = error_type })
     else
         call_fn = function() return call_vote_structured(p) end
     end
 
     local result, err = with_retry("vote", call_fn)
-    local reply_to = payload.reply_to
-    if err or not result or result.vote_target == nil then
+    local vote_target, reasoning = nil, nil
+    if type(result) == "table" then
+        for k, v in pairs(result) do
+            if k == "vote_target" then vote_target = v end
+            if k == "reasoning"   then reasoning   = v end
+        end
+    end
+    if err or vote_target == nil then
         local reason = classify(err).reason
         pe.publish_event("system", "npc.vote",
             "/game/test/round/1",
             { npc_id = NPC_ID, vote_target = nil, reason = "llm_error" })
-        if reply_to then
+        if type(reply_to) == "string" then
             process.send(reply_to, "vote_done",
                 { npc_id = NPC_ID, vote_target = nil, reason = reason })
         end
@@ -304,21 +323,35 @@ local function handle_vote(state, payload)
     end
     pe.publish_event("system", "npc.vote",
         "/game/test/round/1",
-        { npc_id = NPC_ID, vote_target = result.vote_target, reasoning = result.reasoning })
-    if reply_to then
+        { npc_id = NPC_ID, vote_target = vote_target, reasoning = reasoning })
+    if type(reply_to) == "string" then
         process.send(reply_to, "vote_done",
-            { npc_id = NPC_ID, vote_target = result.vote_target, reasoning = result.reasoning })
+            { npc_id = NPC_ID, vote_target = vote_target, reasoning = reasoning })
     end
 end
 
 -- Section J: event ingestion (D-10 belt + D-11 suspenders on render) -------
 
---- ingest_event(state, evt, source_scope) — pull an incoming event off a
---- subscription channel and append to the in-memory event_log if the
---- claimed scope is allowed for this NPC's role. Panic deferred to
---- visible_context (D-11); here we silently drop to keep the log clean.
-local function ingest_event(state, evt, source_scope)
-    local claimed_scope = evt and evt.data and evt.data.scope
+--- unpack_event(evt) — extract (kind, data) from a subscription-channel event
+--- via pairs() to bypass the linter's process.Event narrowing (the linter
+--- unions process.Event into r.value on channels that share a select with
+--- process.events(); process.Event has .kind but not .data).
+local function unpack_event(evt)
+    if type(evt) ~= "table" then return nil, nil end
+    local kind, data
+    for k, v in pairs(evt) do
+        if k == "kind" then kind = v end
+        if k == "data" then data = v end
+    end
+    return kind, data
+end
+
+--- ingest_event(state, kind, data) — append an incoming subscription-channel
+--- event to the in-memory event_log if its claimed scope is allowed for
+--- this NPC's role. Panic deferred to visible_context (D-11); here we
+--- silently drop to keep the log clean.
+local function ingest_event(state, kind, data)
+    local claimed_scope = data and data.scope
     if not pe.scope_allowed(state.role, claimed_scope) then
         logger:warn("[npc_test] dropped event at ingest",
             { role = state.role, claimed_scope = tostring(claimed_scope) })
@@ -326,8 +359,8 @@ local function ingest_event(state, evt, source_scope)
     end
     table.insert(state.event_log, {
         scope = claimed_scope,
-        kind  = evt.kind,
-        text  = (evt.data and evt.data.text) or "",
+        kind  = kind,
+        text  = (data and data.text) or "",
         ts    = os.time(),
     })
 end
@@ -346,7 +379,7 @@ local function run(args)
     logger:info("[npc_test] started", { role = role })
 
     -- D-13/D-15: build the stable block ONCE at boot, hash it, hold both.
-    local stable_block = persona.render_stable_block(persona.FIXTURE, role)
+    local stable_block = tostring(persona.render_stable_block(persona.FIXTURE, role))
     local stable_hash  = hash.sha256(stable_block)
     logger:info("[npc_test] persona stable-block hash", {
         hash  = stable_hash,
@@ -393,11 +426,16 @@ local function run(args)
         if r.channel == inbox then
             local msg = r.value
             local topic = msg:topic()
-            local payload = msg:payload():data() or {}
+            local payload = {}
+            local raw_payload = msg:payload():data()
+            if type(raw_payload) == "table" then
+                for k, v in pairs(raw_payload) do payload[k] = v end
+            end
             if topic == "ping" then
                 -- V-01-01 reachability: immediate pong, no LLM, no SHA check.
-                if payload.reply_to then
-                    process.send(payload.reply_to, "pong", { npc_id = NPC_ID })
+                local rt = payload.reply_to
+                if type(rt) == "string" then
+                    process.send(rt, "pong", { npc_id = NPC_ID })
                 end
             elseif topic == "speak" then
                 handle_speak(state, payload)
@@ -405,10 +443,11 @@ local function run(args)
                 handle_vote(state, payload)
             elseif topic == "export_event_log" then
                 -- V-01-07 villager-no-mafia: return shallow copy of event log.
+                local rt = payload.reply_to
                 local copy = {}
                 for i, e in ipairs(state.event_log) do copy[i] = e end
-                if payload.reply_to then
-                    process.send(payload.reply_to, "event_log", { events = copy })
+                if type(rt) == "string" then
+                    process.send(rt, "event_log", { events = copy })
                 end
             elseif topic == "mutate_persona" then
                 -- V-01-09 debug: mutate the fixture in place so the next
@@ -427,11 +466,14 @@ local function run(args)
                 return
             end
         elseif r.channel == public_ch then
-            ingest_event(state, r.value, "public")
+            local kind, data = unpack_event(r.value)
+            ingest_event(state, kind, data)
         elseif r.channel == system_ch then
-            ingest_event(state, r.value, "system")
+            local kind, data = unpack_event(r.value)
+            ingest_event(state, kind, data)
         elseif r.channel == mafia_ch then
-            ingest_event(state, r.value, "mafia")
+            local kind, data = unpack_event(r.value)
+            ingest_event(state, kind, data)
         end
     end
 end
