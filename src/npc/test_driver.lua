@@ -395,66 +395,16 @@ end
 
 -- [TEST] events-send-auditable (V-01-10): static D-09 audit — game code must
 -- only reach events.send through the src/lib/events.lua wrapper. The Wippy
--- runtime sandboxes io.popen and has no shell executor configured for this
--- project, so we walk a curated list of source files with io.open and pattern
--- match in-process. src/probes/probe.lua is excluded by design (Phase 0
--- scaffolding that tests raw events.send behavior via the events-ordering
--- probe). If io.open is also sandboxed the test SKIPs with a pointer to the
--- manual build-time audit command — Rule 3 deviation tracked in SUMMARY.md.
-local AUDIT_FILES = {
-    "src/lib/events.lua",       -- wrapper — MUST contain exactly one events.send call
-    "src/lib/_index.yaml",
-    "src/npc/persona.lua",
-    "src/npc/visible_context.lua",
-    "src/npc/npc_test.lua",
-    "src/npc/test_driver.lua",
-    "src/npc/_index.yaml",
-    "src/npc/npc_test.yaml",
-    "src/npc/test_driver.yaml",
-}
-
+-- sandbox strips io.popen AND io.open, so this test always SKIPs in-process
+-- and defers to a build-time grep audit (tracked as a Rule 3 deviation in
+-- SUMMARY.md). src/probes/probe.lua is excluded by design.
 local function test_events_send_auditable()
-    -- Guard against the io namespace being nil (Wippy sandbox strips the
-    -- standard-library io table — both io.popen and io.open are unavailable).
-    -- When this is the case the test SKIPs with a pointer to the build-time
-    -- audit. Direct `io` reference under `type(io)` avoids a nil-index crash.
-    if type(io) ~= "table" or type(io.open) ~= "function" then
-        return log_skip("events-send-auditable",
-            "io.open unavailable in wippy sandbox; run manual audit: "
-            .. "grep -rn 'events.send' src/ | grep -v src/lib/events.lua | grep -v src/probes/probe.lua")
-    end
-    local wrapper_hits = 0
-    local offender = nil
-    for _, path in ipairs(AUDIT_FILES) do
-        local fh = io.open(path, "r")
-        if not fh then
-            return log_skip("events-send-auditable",
-                "io.open(" .. path .. ") returned nil; run manual audit")
-        end
-        local content = fh:read("*a") or ""
-        fh:close()
-        local line_no = 0
-        for line in content:gmatch("([^\n]*)\n?") do
-            line_no = line_no + 1
-            if line:find("events%.send%(") then
-                if path == "src/lib/events.lua" then
-                    wrapper_hits = wrapper_hits + 1
-                else
-                    offender = path .. ":" .. line_no .. ":" .. line
-                    break
-                end
-            end
-        end
-        if offender then break end
-    end
-    if offender then
-        return log_fail("events-send-auditable", "offender: " .. offender)
-    end
-    if wrapper_hits ~= 1 then
-        return log_fail("events-send-auditable",
-            "wrapper hit count = " .. tostring(wrapper_hits) .. " (expected 1)")
-    end
-    log_ok("events-send-auditable")
+    -- Wippy sandbox strips the standard-library io table — io.open/io.popen
+    -- are unavailable. V-01-10 always SKIPs in-process; the authoritative
+    -- check is the build-time grep audit, listed below.
+    return log_skip("events-send-auditable",
+        "io unavailable in wippy sandbox; run manual audit: "
+        .. "grep -rn 'events.send' src/ | grep -v src/lib/events.lua | grep -v src/probes/probe.lua")
 end
 
 -- ──────────────────────────────────────────────────────────────────

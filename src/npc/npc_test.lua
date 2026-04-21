@@ -43,10 +43,22 @@ local VOTE_SCHEMA = {
 
 -- Section C: error helpers (D-07 SQL persistence) --------------------------
 
---- Classify an LLM error-return. Retryable for RATE_LIMIT/SERVER_ERROR/
---- TIMEOUT/NETWORK_ERROR; everything else is a one-shot fallback.
+--- Classify an LLM error. Retryable for RATE_LIMIT/SERVER_ERROR/TIMEOUT/
+--- NETWORK_ERROR; everything else is a one-shot fallback. Accepts both
+--- table errors (from our local timeout paths) AND string errors (from
+--- framework/llm normalize_response, which flattens success=false rows to
+--- raw error-message strings) — substring-matched against known retryable
+--- markers from llm.ERROR_TYPE.
 local function classify(err)
     if not err then return { retryable = false, reason = "ok" } end
+    if type(err) == "string" then
+        local s = err:lower()
+        if s:find("rate_limit") then return { retryable = true, reason = "rate_limit" } end
+        if s:find("server_error") then return { retryable = true, reason = "server_error" } end
+        if s:find("timeout") then return { retryable = true, reason = "timeout" } end
+        if s:find("network") then return { retryable = true, reason = "network_error" } end
+        return { retryable = false, reason = "string_error" }
+    end
     local t = err.type
     if t == "RATE_LIMIT" or t == "SERVER_ERROR"
         or t == "TIMEOUT" or t == "NETWORK_ERROR" then
@@ -58,27 +70,33 @@ end
 --- Persist one error row to app:db.errors. D-07 mandates every retry attempt
 --- plus the final fallback each write a row. Acquire/release per-write
 --- (Phase 0 lesson — no imports: on process.lua entries).
+--- Accepts table errors (type/http_code/message) or string errors
+--- (normalize_response flattening — full string goes into message).
 local function persist_error(npc_id, call_type, err, retry_count)
-    logger:warn(string.format("[npc_test] LLM error call=%s retry=%d type=%s",
-        call_type, retry_count, tostring(err and err.type)))
+    local err_type, err_http, err_msg
+    if type(err) == "string" then
+        err_type, err_http, err_msg = "string", "", err
+    elseif type(err) == "table" then
+        err_type = tostring(err.type or "")
+        err_http = tostring(err.http_code or "")
+        err_msg  = tostring(err.message or "")
+    else
+        err_type, err_http, err_msg = tostring(err), "", ""
+    end
+    logger:warn(string.format("[npc_test] LLM error call=%s retry=%d type=%s msg=%s",
+        call_type, retry_count, err_type, err_msg))
     local db, db_err = sql.get("app:db")
     if db_err or not db then
         logger:error("sql.get failed in persist_error", { err = tostring(db_err) })
         return
     end
-    -- err.message is redacted by framework/llm. No headers are persisted.
     -- D-07: storage/sql's db:execute takes params as a single array table
     -- (same contract as db:query) — varargs are NOT spread, they silently
     -- produce a bind mismatch. Discovered during Plan 01-05 smoke boot.
     db:execute(
         "INSERT INTO errors (ts, npc_id, call_type, http_code, message, retry_count) "
         .. "VALUES (?, ?, ?, ?, ?, ?)",
-        {
-            os.time(), npc_id, call_type,
-            tostring((err and err.http_code) or ""),
-            tostring((err and err.message) or ""),
-            retry_count,
-        }
+        { os.time(), npc_id, call_type, err_http, err_msg, retry_count }
     )
     db:release()
 end
@@ -100,7 +118,7 @@ local function with_retry(call_type, fn)
             return nil, err
         end
         local backoff = BACKOFFS[attempt + 1] or "3s"
-        if err.retry_after and err.retry_after > 0 then
+        if type(err) == "table" and err.retry_after and err.retry_after > 0 then
             backoff = tostring(err.retry_after) .. "s"
         end
         time.sleep(backoff)
@@ -108,55 +126,35 @@ local function with_retry(call_type, fn)
     end
 end
 
--- Section E: streaming chat call (D-01, D-03, D-05) ------------------------
+-- Section E: chat call (D-01, D-03, D-05) ----------------------------------
 
---- call_chat_stream(prompt_obj) — fire llm.generate with streaming config,
---- accumulate chunks from process.listen(CHUNK_TOPIC) inside an inner
---- channel.select racing chunk delivery vs 20s deadline vs CANCEL.
---- Returns (text, nil) on success, (nil, err_record) on any failure.
---- process.unlisten is called on EVERY exit path.
-local function call_chat_stream(prompt_obj)
-    local CHUNK_TOPIC = "llm.chat.chunk:" .. tostring(process.pid())
-    local chunk_ch = process.listen(CHUNK_TOPIC)
-    local deadline = time.after(CHAT_CAP_S)
+--- call_chat(prompt_obj) — fire llm.generate in a spawned coroutine so the
+--- NPC main loop keeps its own channel.select responsive. Race the result
+--- channel against a 20s deadline. Returns (text, nil) on success,
+--- (nil, err) on any failure. Phase-1 scope: no streaming relay yet — the
+--- final text comes back via llm.generate's return value. Streaming will be
+--- reintroduced once the frontend relay lands in Phase 2.
+local function call_chat(prompt_obj)
+    local result_ch = channel.new(1)
+    coroutine.spawn(function()
+        local res, err = llm.generate(prompt_obj, { model = MODEL })
+        result_ch:send({ res = res, err = err })
+    end)
 
-    local _, gen_err = llm.generate(prompt_obj, {
-        model  = MODEL,
-        stream = { reply_to = process.pid(), topic = CHUNK_TOPIC },
+    local r = channel.select({
+        result_ch:case_receive(),
+        time.after(CHAT_CAP_S):case_receive(),
     })
-    if gen_err then
-        process.unlisten(chunk_ch)
-        return nil, gen_err
+    if not r.ok or r.channel ~= result_ch then
+        return nil, { type = "TIMEOUT", message = "chat " .. CHAT_CAP_S .. " cap" }
     end
-
-    local buf = {}
-    while true do
-        local r = channel.select({
-            chunk_ch:case_receive(),
-            deadline:case_receive(),
-            process.events():case_receive(),
-        })
-        if not r.ok or r.channel == deadline then
-            process.unlisten(chunk_ch)
-            return nil, { type = "TIMEOUT", message = "chat " .. CHAT_CAP_S .. " cap" }
-        end
-        if r.channel == process.events() and r.value
-            and r.value.kind == process.event.CANCEL then
-            process.unlisten(chunk_ch)
-            return nil, { type = "CANCELLED" }
-        end
-        local chunk = r.value:payload():data()
-        if chunk.type == "chunk" then
-            table.insert(buf, chunk.content or "")
-        elseif chunk.type == "error" then
-            process.unlisten(chunk_ch)
-            return nil, chunk
-        elseif chunk.type == "done" then
-            process.unlisten(chunk_ch)
-            return table.concat(buf), nil
-        end
-        -- "thinking" / "tool_call" ignored in Phase 1
+    if r.value.err then return nil, r.value.err end
+    local res = r.value.res
+    if type(res) == "table" and type(res.result) == "string" then
+        return res.result, nil
     end
+    if type(res) == "string" then return res, nil end
+    return nil, { type = "INVALID_RESPONSE", message = "no result field" }
 end
 
 -- Section F: structured vote call via coroutine.spawn (WARNING 4 lock-in) --
@@ -179,7 +177,14 @@ local function call_vote_structured(prompt_obj)
     if not r.ok or r.channel ~= result_ch then
         return nil, { type = "TIMEOUT", message = "vote " .. VOTE_CAP_S .. " cap" }
     end
-    return r.value.res, r.value.err
+    if r.value.err then return nil, r.value.err end
+    -- framework/llm wraps structured output as { result = <schema_table>, ... }
+    local res = r.value.res
+    if type(res) == "table" and type(res.result) == "table" then
+        return res.result, nil
+    end
+    if type(res) == "table" then return res, nil end
+    return nil, { type = "INVALID_RESPONSE", message = "no structured result" }
 end
 
 -- Section G: prompt building (D-13, D-14, D-16) ----------------------------
@@ -266,7 +271,7 @@ local function handle_speak(state, payload)
     if force_error == true then
         call_fn = forced_error_fn({ error_type = error_type })
     else
-        call_fn = function() return call_chat_stream(p) end
+        call_fn = function() return call_chat(p) end
     end
 
     local text, err = with_retry("chat", call_fn)
@@ -308,14 +313,7 @@ local function handle_vote(state, payload)
     end
 
     local result, err = with_retry("vote", call_fn)
-    local vote_target, reasoning = nil, nil
-    if type(result) == "table" then
-        for k, v in pairs(result) do
-            if k == "vote_target" then vote_target = v end
-            if k == "reasoning"   then reasoning   = v end
-        end
-    end
-    if err or vote_target == nil then
+    if err then
         local reason = classify(err).reason
         pe.publish_event("system", "npc.vote",
             "/game/test/round/1",
@@ -325,6 +323,17 @@ local function handle_vote(state, payload)
                 { npc_id = NPC_ID, vote_target = nil, reason = reason })
         end
         return
+    end
+    -- err == nil: LLM returned a schema-valid object. vote_target may be nil
+    -- (valid abstain per schema: integer | null) — treat it as a happy path
+    -- and forward reasoning without a `reason` key so the test can distinguish
+    -- from the error branch above.
+    local vote_target, reasoning = nil, nil
+    if type(result) == "table" then
+        for k, v in pairs(result) do
+            if k == "vote_target" then vote_target = v end
+            if k == "reasoning"   then reasoning   = v end
+        end
     end
     pe.publish_event("system", "npc.vote",
         "/game/test/round/1",
