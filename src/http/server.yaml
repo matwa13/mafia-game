@@ -1,0 +1,15 @@
+version: "1.0"
+namespace: app.http
+
+entries:
+  - name: server
+    kind: http.service
+    addr: ":8080"
+    timeouts:
+      read: "5s"
+      write: "30s"
+      idle: "60s"
+    lifecycle:
+      auto_start: true
+      start_timeout: 30s
+      stop_timeout: 10s
