@@ -3,7 +3,7 @@
 -- This is the ONLY place an NPC prompt is built from events.
 -- Suspicion state (D-16) is NOT read here — only in vote-turn rendering.
 
-local pe = require("events")
+local pe = require("pe")
 
 local function visible_context(npc_id, state)
     local lines = {}
