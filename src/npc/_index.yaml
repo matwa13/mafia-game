@@ -1,3 +1,17 @@
 version: "1.0"
 namespace: app.npc
-entries: []
+
+entries:
+  # Single-persona fixture + pure render_stable_block(fixture, role) used as
+  # byte-identity source for the D-15 SHA-256 tripwire.
+  - name: persona
+    kind: library.lua
+    source: file://persona.lua
+
+  # Single scope+role filter that is the ONLY approved event-to-prompt
+  # renderer (D-11). Panics on cross-scope leak for the live NPC.
+  - name: visible_context
+    kind: library.lua
+    source: file://visible_context.lua
+    imports:
+      pe: app.lib:events

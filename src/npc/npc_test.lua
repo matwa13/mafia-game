@@ -19,9 +19,9 @@ local json            = require("json")
 local llm             = require("llm")
 local prompt          = require("prompt")
 local hash            = require("hash")
-local pe              = require("app.lib:events")
-local persona         = require("app.npc:persona")
-local visible_context = require("app.npc:visible_context")
+local pe              = require("pe")
+local persona         = require("persona")
+local visible_context = require("visible_context")
 
 -- Section B: constants -----------------------------------------------------
 local NPC_ID      = "npc:test"       -- runtime process-id (colons allowed)

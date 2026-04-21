@@ -1,3 +1,11 @@
 version: "1.0"
 namespace: app.lib
-entries: []
+
+entries:
+  # publish_event + scope_allowed helpers. D-09 invariant: this file is the
+  # ONLY approved `events.send` call site in the project.
+  - name: events
+    kind: library.lua
+    source: file://events.lua
+    modules:
+      - events

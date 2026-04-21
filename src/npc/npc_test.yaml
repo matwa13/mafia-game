@@ -11,9 +11,13 @@ entries:
       - time
       - sql
       - json
-      - llm
-      - prompt
       - hash
+    imports:
+      llm: wippy.llm:llm
+      prompt: wippy.llm:prompt
+      pe: app.lib:events
+      persona: app.npc:persona
+      visible_context: app.npc:visible_context
     method: run
 
   - name: npc_test_service
