@@ -6,7 +6,7 @@ export default function App() {
   const [echo, setEcho] = useState<EchoResult>("pending");
 
   useEffect(() => {
-    const url = `ws://${window.location.host}/ws`;
+    const url = `ws://${window.location.host}/ws/`;
     const ws = new WebSocket(url);
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: "echo_ping", payload: { ts: Date.now() } }));

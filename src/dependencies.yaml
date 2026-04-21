@@ -25,3 +25,19 @@ entries:
     parameters:
       - name: app_db
         value: app:db
+
+  # Binds the wippy/relay module's ns.requirements:
+  #   - application_host → our process.host (central hub + per-user hubs live here)
+  #   - user_security_scope → named scope applied to each spawned user hub
+  #   - env_storage → our writable env storage (shared with bootloader)
+  - name: dep.relay
+    kind: ns.dependency
+    component: wippy/relay
+    version: "*"
+    parameters:
+      - name: application_host
+        value: app.processes:host
+      - name: user_security_scope
+        value: app.security:user
+      - name: env_storage
+        value: app:env
