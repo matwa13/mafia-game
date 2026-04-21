@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "wippy-kb": {
+      "type": "http",
+      "url": "https://central.kb.wj.wippy.ai/api/public/mcp"
+    }
+  }
+}

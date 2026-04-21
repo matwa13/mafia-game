@@ -1,0 +1,209 @@
+# Wippy
+
+> Intelligent application runtime and workflow engine for agentic AI
+
+Wippy is an open-source platform where AI agents can safely build and extend applications at runtime. Single binary deployment with durable actors, typed Lua scripting, and WASM support.
+
+## API Endpoints
+
+- Browse structure: https://wippy.ai/llm/toc
+- Search: https://wippy.ai/llm/search?q=your+query
+- Fetch page: https://wippy.ai/llm/path/en/<path>
+- Batch fetch: https://wippy.ai/llm/context?paths=path1,path2
+- Get chunk: https://wippy.ai/llm/chunk/<id>
+- Related content: https://wippy.ai/llm/related/<id>
+- Full docs dump: https://wippy.ai/llms-full.txt
+
+## Documentation
+
+### Getting Started
+
+- [What is Wippy](https://wippy.ai/llm/path/en/start/about)
+- [Installation](https://wippy.ai/llm/path/en/start/installation)
+- [Project Structure](https://wippy.ai/llm/path/en/start/structure)
+
+### Guides
+
+- [CLI](https://wippy.ai/llm/path/en/guides/cli)
+- [Configuration](https://wippy.ai/llm/path/en/guides/configuration)
+- [Linter](https://wippy.ai/llm/path/en/guides/linter)
+- [Language Server](https://wippy.ai/llm/path/en/guides/lsp)
+- [Dependency Management](https://wippy.ai/llm/path/en/guides/dependency-management)
+- [Entry Kinds](https://wippy.ai/llm/path/en/guides/entry-kinds)
+- [Observability](https://wippy.ai/llm/path/en/guides/observability)
+- [Queue Consumers](https://wippy.ai/llm/path/en/guides/queue-consumers)
+- [Supervision](https://wippy.ai/llm/path/en/guides/supervision)
+- [Publishing](https://wippy.ai/llm/path/en/guides/publishing)
+
+### Core Concepts
+
+- [Compute Units](https://wippy.ai/llm/path/en/concepts/compute-units)
+- [Registry](https://wippy.ai/llm/path/en/concepts/registry)
+- [Process Model](https://wippy.ai/llm/path/en/concepts/process-model)
+- [Functions](https://wippy.ai/llm/path/en/concepts/functions)
+- [Workflows](https://wippy.ai/llm/path/en/concepts/workflows)
+
+### Lua Runtime
+
+- [Overview](https://wippy.ai/llm/path/en/lua/overview)
+- [Types](https://wippy.ai/llm/path/en/lua/types)
+- [Entries](https://wippy.ai/llm/path/en/lua/entries)
+
+#### Core
+
+- [Base](https://wippy.ai/llm/path/en/lua/core/base)
+- [Errors](https://wippy.ai/llm/path/en/lua/core/errors)
+- [Time](https://wippy.ai/llm/path/en/lua/core/time)
+- [Channels](https://wippy.ai/llm/path/en/lua/core/channel)
+- [Process](https://wippy.ai/llm/path/en/lua/core/process)
+- [Functions](https://wippy.ai/llm/path/en/lua/core/funcs)
+- [Future](https://wippy.ai/llm/path/en/lua/core/future)
+- [Stream](https://wippy.ai/llm/path/en/lua/core/stream)
+- [Context](https://wippy.ai/llm/path/en/lua/core/context)
+- [Events](https://wippy.ai/llm/path/en/lua/core/events)
+- [Registry](https://wippy.ai/llm/path/en/lua/core/registry)
+- [Contract](https://wippy.ai/llm/path/en/lua/core/contract)
+
+#### Data Formats
+
+- [JSON](https://wippy.ai/llm/path/en/lua/data/json)
+- [YAML](https://wippy.ai/llm/path/en/lua/data/yaml)
+- [Base64](https://wippy.ai/llm/path/en/lua/data/base64)
+- [Compress](https://wippy.ai/llm/path/en/lua/data/compress)
+- [Payload](https://wippy.ai/llm/path/en/lua/data/payload)
+- [Excel](https://wippy.ai/llm/path/en/lua/data/excel)
+
+#### HTTP & Web
+
+- [HTTP](https://wippy.ai/llm/path/en/lua/http/http)
+- [HTTP Client](https://wippy.ai/llm/path/en/lua/http/client)
+- [WebSocket](https://wippy.ai/llm/path/en/lua/http/websocket)
+- [HTML](https://wippy.ai/llm/path/en/lua/http/html)
+
+#### Storage
+
+- [SQL](https://wippy.ai/llm/path/en/lua/storage/sql)
+- [Store](https://wippy.ai/llm/path/en/lua/storage/store)
+- [Filesystem](https://wippy.ai/llm/path/en/lua/storage/filesystem)
+- [Cloud Storage](https://wippy.ai/llm/path/en/lua/storage/cloud)
+- [Queue](https://wippy.ai/llm/path/en/lua/storage/queue)
+
+#### System
+
+- [System](https://wippy.ai/llm/path/en/lua/system/system)
+- [Environment](https://wippy.ai/llm/path/en/lua/system/env)
+- [Logger](https://wippy.ai/llm/path/en/lua/system/logger)
+- [I/O](https://wippy.ai/llm/path/en/lua/system/io)
+- [Metrics](https://wippy.ai/llm/path/en/lua/system/metrics)
+- [OS Time](https://wippy.ai/llm/path/en/lua/system/ostime)
+- [TTY](https://wippy.ai/llm/path/en/lua/system/tty)
+
+#### Text & Templates
+
+- [Text](https://wippy.ai/llm/path/en/lua/text/text)
+- [Template](https://wippy.ai/llm/path/en/lua/text/template)
+- [TreeSitter](https://wippy.ai/llm/path/en/lua/text/treesitter)
+
+#### Security
+
+- [Security](https://wippy.ai/llm/path/en/lua/security/security)
+- [Crypto](https://wippy.ai/llm/path/en/lua/security/crypto)
+- [Hash](https://wippy.ai/llm/path/en/lua/security/hash)
+- [UUID](https://wippy.ai/llm/path/en/lua/security/uuid)
+
+#### Dynamic
+
+- [Eval](https://wippy.ai/llm/path/en/lua/dynamic/eval)
+- [Exec](https://wippy.ai/llm/path/en/lua/dynamic/exec)
+- [Expression](https://wippy.ai/llm/path/en/lua/dynamic/expression)
+
+### WASM Runtime
+
+- [Overview](https://wippy.ai/llm/path/en/wasm/overview)
+- [Functions](https://wippy.ai/llm/path/en/wasm/functions)
+- [Host Functions](https://wippy.ai/llm/path/en/wasm/hosts)
+- [Processes](https://wippy.ai/llm/path/en/wasm/processes)
+
+### Framework
+
+- [Overview](https://wippy.ai/llm/path/en/framework/overview)
+- [LLM](https://wippy.ai/llm/path/en/framework/llm)
+- [Agents](https://wippy.ai/llm/path/en/framework/agents)
+- [Testing](https://wippy.ai/llm/path/en/framework/testing)
+- [Dataflow](https://wippy.ai/llm/path/en/framework/dataflow)
+- [Relay](https://wippy.ai/llm/path/en/framework/relay)
+- [Views](https://wippy.ai/llm/path/en/framework/views)
+  - [Facade](https://wippy.ai/llm/path/en/framework/facade)
+
+### Temporal
+
+- [Overview](https://wippy.ai/llm/path/en/temporal/overview)
+- [Activities](https://wippy.ai/llm/path/en/temporal/activities)
+- [Workflows](https://wippy.ai/llm/path/en/temporal/workflows)
+
+### System Components
+
+- [Process Host](https://wippy.ai/llm/path/en/system/process-host)
+- [Terminal](https://wippy.ai/llm/path/en/system/terminal)
+- [Database](https://wippy.ai/llm/path/en/system/database)
+- [Store](https://wippy.ai/llm/path/en/system/store)
+- [Queue](https://wippy.ai/llm/path/en/system/queue)
+- [Filesystem](https://wippy.ai/llm/path/en/system/filesystem)
+- [Cloud Storage](https://wippy.ai/llm/path/en/system/cloudstorage)
+- [Environment](https://wippy.ai/llm/path/en/system/env)
+- [Template](https://wippy.ai/llm/path/en/system/template)
+- [Security](https://wippy.ai/llm/path/en/system/security)
+- [Exec](https://wippy.ai/llm/path/en/system/exec)
+
+### HTTP
+
+- [Server](https://wippy.ai/llm/path/en/http/server)
+- [Router](https://wippy.ai/llm/path/en/http/router)
+- [Endpoint](https://wippy.ai/llm/path/en/http/endpoint)
+- [Middleware](https://wippy.ai/llm/path/en/http/middleware)
+- [Static Files](https://wippy.ai/llm/path/en/http/static)
+- [WebSocket Relay](https://wippy.ai/llm/path/en/http/websocket-relay)
+- [Server-Sent Events](https://wippy.ai/llm/path/en/http/sse)
+
+### Tutorials
+
+- [Hello World](https://wippy.ai/llm/path/en/tutorials/hello-world)
+- [CLI Applications](https://wippy.ai/llm/path/en/tutorials/cli)
+- [Echo Service](https://wippy.ai/llm/path/en/tutorials/echo-service)
+- [Channels](https://wippy.ai/llm/path/en/tutorials/channels)
+- [Processes](https://wippy.ai/llm/path/en/tutorials/processes)
+- [Supervision](https://wippy.ai/llm/path/en/tutorials/supervision)
+- [Task Queue](https://wippy.ai/llm/path/en/tutorials/task-queue)
+- [Authentication](https://wippy.ai/llm/path/en/tutorials/auth)
+- [Rust WASM](https://wippy.ai/llm/path/en/tutorials/rust-wasm)
+- [LLM Agent](https://wippy.ai/llm/path/en/tutorials/llm-agent)
+- [Micro AGI](https://wippy.ai/llm/path/en/tutorials/micro-agi)
+
+### Internals
+
+- [Architecture](https://wippy.ai/llm/path/en/internals/architecture)
+- [Registry](https://wippy.ai/llm/path/en/internals/registry)
+- [Scheduler](https://wippy.ai/llm/path/en/internals/scheduler)
+- [Dispatch](https://wippy.ai/llm/path/en/internals/dispatch)
+- [Events](https://wippy.ai/llm/path/en/internals/events)
+- [Modules](https://wippy.ai/llm/path/en/internals/modules)
+- [Kinds](https://wippy.ai/llm/path/en/internals/kinds)
+
+### About
+
+- [Contributing](https://wippy.ai/llm/path/en/about/contributing)
+- [License](https://wippy.ai/llm/path/en/about/license)
+
+### LLM
+
+- [Platform Brief](https://wippy.ai/llm/path/en/start/llm-brief)
+
+## CLI Operations Reference
+
+`wippy init` - Initialize a new project
+`wippy run` - Run the application
+`wippy hub install <package>` - Install a package from Hub
+`wippy hub publish` - Publish a package to Hub
+`wippy lint` - Run the linter
+`wippy test` - Run tests
+`wippy build` - Build the project

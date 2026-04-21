@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "docs": [
+    {
+      "path": "docs/reference/wippy-docs-llms.txt",
+      "title": "Wippy LLM Docs Index",
+      "category": "reference",
+      "summary": "API endpoints and documentation index for Wippy platform"
+    },
+    {
+      "path": "docs/reference/code-style-guide.md",
+      "title": "Code Style Guide",
+      "category": "reference",
+      "summary": "This document defines code style requirements for Lua and YAML files in DocBrief."
+    },
+    {
+      "path": "docs/PLAN.md",
+      "title": "Project Plan",
+      "category": "spec",
+      "summary": "Main file with planning and projects state"
+    },
+    {
+      "path": "docs/specs/Single-Player-Mafia-MVP-Business-Spec.md",
+      "title": "Business Requirements",
+      "category": "spec",
+      "summary": "Initial Business Requirements"
+    }
+  ]
+}
