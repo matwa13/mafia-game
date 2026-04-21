@@ -1,0 +1,16 @@
+version: "1.0"
+namespace: app.storage.migrations
+
+entries:
+  - name: 0002_errors_table
+    kind: function.lua
+    meta:
+      type: migration
+      target_db: app:db
+      description: Add errors table for LLM call failure persistence (D-07)
+      depends_on: [ns:wippy.migration, app.storage.migrations:0001_initial_schema]
+      timestamp: "2026-04-21T12:00:00Z"
+    source: file://0002_errors_table.lua
+    imports:
+      migration: wippy.migration:migration
+    method: migrate
