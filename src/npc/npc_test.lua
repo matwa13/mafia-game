@@ -67,13 +67,18 @@ local function persist_error(npc_id, call_type, err, retry_count)
         return
     end
     -- err.message is redacted by framework/llm. No headers are persisted.
+    -- D-07: storage/sql's db:execute takes params as a single array table
+    -- (same contract as db:query) — varargs are NOT spread, they silently
+    -- produce a bind mismatch. Discovered during Plan 01-05 smoke boot.
     db:execute(
         "INSERT INTO errors (ts, npc_id, call_type, http_code, message, retry_count) "
         .. "VALUES (?, ?, ?, ?, ?, ?)",
-        os.time(), npc_id, call_type,
-        tostring((err and err.http_code) or ""),
-        tostring((err and err.message) or ""),
-        retry_count
+        {
+            os.time(), npc_id, call_type,
+            tostring((err and err.http_code) or ""),
+            tostring((err and err.message) or ""),
+            retry_count,
+        }
     )
     db:release()
 end
