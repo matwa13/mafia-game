@@ -1,0 +1,16 @@
+version: "1.0"
+namespace: app
+
+entries:
+  - name: db
+    kind: db.sql.sqlite
+    file: "./data/mafia.db"
+    pool:
+      max_open: 1
+      max_idle: 1
+      max_lifetime: "1h"
+    options:
+      cache: "shared"
+      journal_mode: "WAL"
+    lifecycle:
+      auto_start: true

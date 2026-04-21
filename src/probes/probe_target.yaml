@@ -1,0 +1,25 @@
+version: "1.0"
+namespace: app.probes
+
+entries:
+  # Probe target — trivial ping/pong responder used by the registry-xprocess
+  # probe. Auto-started by the sibling process.service so it is present in
+  # the process registry at boot and resolvable by name from probe.lua.
+  - name: probe_target
+    kind: process.lua
+    source: file://probe_target.lua
+    modules:
+      - logger
+    method: run
+
+  - name: probe_target_service
+    kind: process.service
+    process: app.probes:probe_target
+    host: app.processes:host
+    lifecycle:
+      auto_start: true
+      restart:
+        max_attempts: 3
+        initial_delay: 1s
+        max_delay: 10s
+        backoff_factor: 2.0

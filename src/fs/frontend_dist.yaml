@@ -1,0 +1,7 @@
+version: "1.0"
+namespace: app.fs
+
+entries:
+  - name: frontend_dist
+    kind: fs.directory
+    directory: ./frontend/dist

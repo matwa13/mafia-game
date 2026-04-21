@@ -1,0 +1,23 @@
+version: "1.0"
+namespace: app.security
+
+entries:
+  # Named scope used by the relay `user` hub (one per WS user).
+  # The central relay hub calls `security.named_scope("app.security:user")`
+  # and attaches this scope (its attached policies) to each spawned user hub.
+  # MVP: single-player local-only — grant all actions on all resources.
+  - name: user
+    kind: registry.entry
+    meta:
+      comment: "Relay user-hub security scope name (MVP: open for local-only play)"
+
+  - name: user.policy
+    kind: security.policy
+    meta:
+      comment: "Allow-all policy bound to app.security:user (MVP local-only)"
+    groups:
+      - app.security:user
+    policy:
+      actions: "*"
+      resources: "*"
+      effect: allow

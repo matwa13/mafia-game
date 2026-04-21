@@ -1,0 +1,17 @@
+version: "1.0"
+namespace: app.http
+
+entries:
+  # WebSocket router mounted at /ws on the same http.service as the static SPA.
+  # `websocket_relay` post-middleware intercepts the upgrade request and reads
+  # the `X-WS-Relay` header set by ws_endpoint to route frames to the central
+  # relay hub (registered as "wippy.central").
+  - name: ws_router
+    kind: http.router
+    meta:
+      server: app.http:server
+    prefix: /ws
+    post_middleware:
+      - websocket_relay
+    post_options:
+      wsrelay.allowed.origins: "http://localhost:8080"

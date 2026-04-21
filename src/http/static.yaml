@@ -1,0 +1,15 @@
+version: "1.0"
+namespace: app.http
+
+entries:
+  - name: static
+    kind: http.static
+    meta:
+      server: app.http:server
+      router: app.http:root
+    path: /
+    fs: app.fs:frontend_dist
+    static_options:
+      spa: true
+      index: index.html
+      cache: "public, max-age=60"
