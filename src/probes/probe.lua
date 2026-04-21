@@ -39,20 +39,39 @@ local function probe_db(db)
         "games", "players", "rounds", "messages", "votes",
         "night_actions", "suspicion_snapshots", "eliminations",
     }
-    local rows, err = db:query(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-    )
-    if err or not rows then
-        return log_fail("db", "query failed: " .. tostring(err))
-    end
-    local found = {}
-    for _, row in ipairs(rows) do found[row.name] = true end
-    for _, t in ipairs(expected) do
-        if not found[t] then
-            return log_fail("db", "missing table: " .. t)
+    -- Migrations run via the bootloader concurrently with probe_service
+    -- startup at lifecycle level 1. On clean-slate boot (no prior DB file)
+    -- the query can land before the schema has been populated. Retry for
+    -- ~5 seconds until all 8 expected tables appear — mirrors the registry
+    -- retry in probe_registry_xprocess (Rule 3, blocking race fix).
+    local last_missing, last_err
+    for attempt = 1, 50 do
+        local rows, err = db:query(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        )
+        if err or not rows then
+            last_err = err
+        else
+            local found = {}
+            for _, row in ipairs(rows) do found[row.name] = true end
+            local missing = nil
+            for _, t in ipairs(expected) do
+                if not found[t] then
+                    missing = t
+                    break
+                end
+            end
+            if not missing then
+                return log_ok("db")
+            end
+            last_missing = missing
         end
+        time.sleep("100ms")
     end
-    log_ok("db")
+    if last_err then
+        return log_fail("db", "query failed: " .. tostring(last_err))
+    end
+    return log_fail("db", "missing table after 5s: " .. tostring(last_missing))
 end
 
 -- ──────────────────────────────────────────────────────────────────
