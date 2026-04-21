@@ -41,3 +41,16 @@ entries:
         value: app.security:user
       - name: env_storage
         value: app:env
+
+  # Binds the wippy/llm module's ns.requirements:
+  #   - process_host → our process.host (Bedrock/Google credential refreshers spawn here)
+  #   - env_storage → our writable env storage (reads ANTHROPIC_API_KEY etc.)
+  - name: dep.llm
+    kind: ns.dependency
+    component: wippy/llm
+    version: "*"
+    parameters:
+      - name: process_host
+        value: app.processes:host
+      - name: env_storage
+        value: app:env
