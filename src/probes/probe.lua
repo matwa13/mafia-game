@@ -209,9 +209,13 @@ local function probe_echo()
         end
 
         local ok_json, decoded = pcall(json.decode, msg.data)
-        if not ok_json or type(decoded) ~= "table" then
+        if not ok_json then
             client:close(websocket.CLOSE_CODES.NORMAL, "probe bad json")
-            return log_fail("echo", "json decode: " .. tostring(decoded))
+            return log_fail("echo", "json decode error: " .. tostring(decoded))
+        end
+        if type(decoded) ~= "table" then
+            client:close(websocket.CLOSE_CODES.NORMAL, "probe not a table")
+            return log_fail("echo", "frame not a json object: type=" .. type(decoded))
         end
 
         -- The websocket_relay middleware wraps outbound plugin frames as
