@@ -11,6 +11,6 @@ entries:
       max_lifetime: "1h"
     options:
       cache: "shared"
-      _journal_mode: "WAL"
+      journal_mode: "WAL"
     lifecycle:
       auto_start: true
