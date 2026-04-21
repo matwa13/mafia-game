@@ -4,7 +4,7 @@ namespace: app.http
 entries:
   - name: server
     kind: http.service
-    addr: ":8080"
+    addr: "127.0.0.1:8080"
     timeouts:
       read: "5s"
       write: "30s"
