@@ -16,6 +16,9 @@ local sql = require("sql")
 local uuid = require("uuid")
 local env = require("env")
 local pe = require("pe")  -- Phase 1 D-11 precedent: yaml imports pe -> app.lib:events
+local sampler      = require("sampler")
+local persona_pool = require("persona_pool")
+local persona      = require("persona")
 
 local DAY_DURATION_PROD = "60s"
 local DAY_DURATION_DEV  = "3s"
@@ -24,6 +27,14 @@ local PACING_DEV_MS     = 100
 
 local function dev_mode()
     return env.get("MAFIA_DEV_MODE") == "1"
+end
+
+-- MAFIA_NPC_MODE routing (D-08): "real" (default) or "stub". Phase 2 test_driver
+-- sets this to "stub" via .env to keep the Phase 2 V-02-XX harness green.
+local function npc_mode()
+    local m = env.get("MAFIA_NPC_MODE")
+    if m == "stub" or m == "real" then return m end
+    return "real"
 end
 
 -- Deterministic Fisher-Yates shuffle of the canonical 2M+4V role pool across 6 slots.
@@ -95,20 +106,48 @@ local function persist_roles(game_id, roles, player_slot)
     return true
 end
 
--- Spawn one npc_stub per non-player slot. D-02: human is slot 1; NPC stubs occupy slots 2..6.
-local function spawn_stubs(game_id, roles, player_slot)
+-- Renamed: spawn_npcs. Under MAFIA_NPC_MODE=stub, behaves like Phase 2.
+-- Under MAFIA_NPC_MODE=real, spawns app.npc:npc with full persona args.
+local function spawn_npcs(game_id, roles, player_slot, slot_persona, roster_names, name_to_slot)
     local npc_pids = {}
+    local mode = npc_mode()
+    local target = (mode == "real") and "app.npc:npc" or "app.npc:npc_stub"
+    logger:info("[orchestrator] spawn_npcs", { game_id = game_id, mode = mode, target = target })
     for slot = 1, 6 do  -- 6 = canonical participant count (D-02)
         if slot ~= player_slot then
-            local role = roles[slot]
-            local partner = compute_partner_slot(roles, slot)
-            local pid, err = process.spawn_linked_monitored("app.npc:npc_stub", "app.processes:host", {
-                game_id = game_id,
-                slot = slot,
-                role = role,
-                mafia_partner_slot = partner,
+            -- Compute partner info if this slot is mafia.
+            local partner_slot = nil
+            local partner_name = nil
+            if roles[slot] == "mafia" then
+                for s = 1, 6 do
+                    if s ~= slot and roles[s] == "mafia" then
+                        partner_slot = s
+                        if s ~= player_slot and slot_persona[s] then
+                            partner_name = slot_persona[s].name
+                        elseif s == player_slot then
+                            partner_name = "You"
+                        end
+                        break
+                    end
+                end
+            end
+            local spawn_args = {
+                game_id = game_id, slot = slot, role = roles[slot],
+                mafia_partner_slot = partner_slot,
+                mafia_partner_name = partner_name,
                 parent_pid = process.pid(),
-            })
+            }
+            -- Phase 3 real-NPC additions (ignored by stub).
+            if mode == "real" and slot_persona[slot] then
+                spawn_args.name = slot_persona[slot].name
+                spawn_args.archetype = slot_persona[slot].archetype
+                spawn_args.archetype_id = slot_persona[slot].archetype_id
+                spawn_args.voice_quirk = slot_persona[slot].voice_quirk
+                spawn_args.canonical_utterances = slot_persona[slot].canonical_utterances
+                spawn_args.roster_names = roster_names
+                spawn_args.name_to_slot = name_to_slot
+            end
+            local pid, err = process.spawn_linked_monitored(target, "app.processes:host", spawn_args)
             if not pid then
                 return nil, "spawn slot=" .. slot .. ": " .. tostring(err)
             end
@@ -290,7 +329,9 @@ end
 -- Write one message row and publish chat.line. SOLE site that mutates chat_seq
 -- and SOLE publisher of `chat.line`. SETUP-05: INSERT precedes publish_event.
 -- Returns the assigned seq on success, or nil + err on failure.
-local function commit_chat_line(game_id, round, from_slot, text, chat_seq)
+-- Optional `kind` param (default "npc") allows "human" and "last_words" callers.
+local function commit_chat_line(game_id, round, from_slot, text, chat_seq, kind)
+    kind = kind or "npc"
     chat_seq[round] = (chat_seq[round] or 0) + 1
     local seq = chat_seq[round]
 
@@ -299,8 +340,8 @@ local function commit_chat_line(game_id, round, from_slot, text, chat_seq)
         return nil, "sql.get: " .. tostring(db_err)
     end
     local _, exec_err = db:execute(
-        "INSERT INTO messages (game_id, round, seq, phase, from_slot, kind, text, created_at) VALUES (?, ?, ?, 'day', ?, 'npc', ?, ?)",
-        { game_id, round, seq, from_slot, text, time.now():unix() }
+        "INSERT INTO messages (game_id, round, seq, phase, from_slot, kind, text, created_at) VALUES (?, ?, ?, 'day', ?, ?, ?, ?)",
+        { game_id, round, seq, from_slot, kind, text, time.now():unix() }
     )
     db:release()
     if exec_err then
@@ -313,8 +354,92 @@ local function commit_chat_line(game_id, round, from_slot, text, chat_seq)
         seq = seq,
         from_slot = from_slot,
         text = text,
+        kind = kind,
     })
     return seq, nil
+end
+
+-- commit_player_chat: convenience wrapper for human interjections (kind="human").
+-- D-15 invariant: routes through commit_chat_line, the SOLE writer of messages.
+local function commit_player_chat(game_id, round, from_slot, text, chat_seq)
+    return commit_chat_line(game_id, round, from_slot, tostring(text or ""), chat_seq, "human")
+end
+
+-- Publish system/game_state_changed snapshot on every phase transition.
+-- Takes explicit fields to avoid wippy-lint struct-shape union issues (same
+-- pattern as run_night_stub / run_day_discussion).
+-- CRITICAL: alive_map is state.alive — the canonical and SOLE liveness field
+-- (Phase 2 invariant at :785). No parallel eliminated-slot table exists.
+-- roles_map: state.roles. slot_persona_map: state.slot_persona (may be nil).
+-- roster_names_map: state.roster_names (may be nil). player_sl: state.player_slot.
+-- Build roster snapshot from the canonical Phase 2 alive/roles tables.
+-- alive_map is state.alive — the SOLE liveness field. Role is revealed only
+-- when alive_map[slot] == false (slot is dead). No parallel eliminated-slot table.
+local function build_gsc_roster(alive_map, roles_map, slot_persona_map, roster_names_map, player_sl)
+    local roster = {}
+    for slot = 1, 6 do
+        local name
+        if slot == player_sl then
+            name = "You"
+        else
+            local sp = slot_persona_map and slot_persona_map[slot]
+            if sp then
+                name = sp.name or ("slot-" .. tostring(slot))
+            elseif roster_names_map then
+                name = roster_names_map[slot] or ("slot-" .. tostring(slot))
+            else
+                name = "slot-" .. tostring(slot)
+            end
+        end
+        -- Use rawget to avoid wippy-lint's union-narrowing on table index
+        -- (alive_map is state.alive: {[integer]:boolean}, canonical Phase 2 field).
+        local is_alive = (rawget(alive_map, slot) == true)
+        local revealed_role = nil
+        if not is_alive then
+            revealed_role = roles_map[slot]
+        end
+        roster[slot] = { name = name, alive = is_alive, role = revealed_role }
+    end
+    return roster
+end
+
+-- Publish system/game_state_changed on phase transitions (no elimination payload).
+-- Takes explicit fields — avoids wippy-lint struct-shape union issues.
+local function emit_game_state_changed(game_id, alive_map, roles_map,
+                                        slot_persona_map, roster_names_map,
+                                        player_sl, phase, round, chat_locked)
+    local roster = build_gsc_roster(alive_map, roles_map, slot_persona_map,
+                                     roster_names_map, player_sl)
+    pe.publish_event("system", "game_state_changed", "/" .. game_id, {
+        phase = phase or "unknown",
+        round = round or 0,
+        alive = alive_map,
+        roster = roster,
+        player_slot = player_sl,
+        game_id = game_id,
+        chat_locked = chat_locked or false,
+    })
+end
+
+-- Variant that carries last_eliminated payload (lynch/night-kill reveal).
+local function emit_game_state_changed_elim(game_id, alive_map, roles_map,
+                                             slot_persona_map, roster_names_map,
+                                             player_sl, phase, round,
+                                             elim_slot, elim_name, elim_role, elim_cause)
+    local roster = build_gsc_roster(alive_map, roles_map, slot_persona_map,
+                                     roster_names_map, player_sl)
+    pe.publish_event("system", "game_state_changed", "/" .. game_id, {
+        phase = phase or "unknown",
+        round = round or 0,
+        alive = alive_map,
+        roster = roster,
+        player_slot = player_sl,
+        game_id = game_id,
+        chat_locked = true,
+        last_eliminated = {
+            slot = elim_slot, name = elim_name, role = elim_role, cause = elim_cause,
+        },
+    })
 end
 
 -- run_day_discussion: one speaker at a time; per-speaker cap + day-level deadline
@@ -443,6 +568,162 @@ local function run_day_discussion(game_id, round, alive, player_slot, npc_pids,
         round = round, reason = reason,
     })
     logger:info("[orchestrator] day complete", { round = round, reason = reason })
+    return true, nil
+end
+
+-- Phase 3: run_day_discussion_streaming.
+-- Same outer contract as run_day_discussion but:
+--   - each living NPC gets up to 2 messages (1st mandatory, 2nd optional)
+--   - races per-speaker deadline + day-level deadline + interjection + streaming chunks
+--   - dispatches chat.stream.chunk, chat.submit, chat.decline, player.chat, abort.turn
+-- Takes explicit state fields (rng_seed, roles, slot_persona, roster_names) to avoid
+-- wippy-lint struct-shape union issues (same pattern as run_night_stub).
+local function run_day_discussion_streaming(game_id, round, alive, player_slot, npc_pids,
+                                            dev_mode_flag, chat_seq, inbox,
+                                            rng_seed, roles, slot_persona, roster_names)
+    local day_duration_s = dev_mode_flag and "15s" or "60s"
+    local per_speaker_s  = dev_mode_flag and "8s"  or "25s"
+
+    -- Randomized-start round-robin over alive NPC slots (exclude player).
+    math.randomseed(math.floor(tonumber(rng_seed) or 0) + round * 1000)
+    local living_npc_slots = {}
+    for slot = 1, 6 do
+        if alive[slot] and slot ~= player_slot then
+            table.insert(living_npc_slots, slot)
+        end
+    end
+    -- Fisher-Yates
+    for i = #living_npc_slots, 2, -1 do
+        local j = math.random(i)
+        living_npc_slots[i], living_npc_slots[j] = living_npc_slots[j], living_npc_slots[i]
+    end
+
+    local day_deadline = time.after(day_duration_s)
+    local day_deadline_fired = false
+
+    for _, slot in ipairs(living_npc_slots) do
+        if not alive[slot] then
+            goto continue_slot
+        end
+        local npc_pid = npc_pids[slot]
+        if not npc_pid then
+            goto continue_slot
+        end
+
+        for msg_index = 1, 2 do
+            local is_mandatory = (msg_index == 1)
+
+            process.send(npc_pid, "day.turn", {
+                round = round,
+                msg_index = msg_index,
+                is_mandatory = is_mandatory,
+            })
+
+            local per_speaker_ch = time.after(per_speaker_s)
+            local done_this_msg = false
+            while not done_this_msg do
+                local cases = { inbox:case_receive(), per_speaker_ch:case_receive() }
+                if not day_deadline_fired then
+                    table.insert(cases, day_deadline:case_receive())
+                end
+                local r = channel.select(cases)
+
+                if r.channel == inbox then
+                    local msg = r.value
+                    local tp  = msg and msg:topic() or ""
+                    local raw = (msg and msg:payload() and msg:payload():data()) or {}
+
+                    if tp == "chat.stream.chunk" and raw.from_slot == slot and raw.round == round then
+                        -- Pattern 3 re-emit: publish as public chat.chunk; do NOT persist.
+                        pe.publish_event("public", "chat.chunk", "/" .. game_id, {
+                            round = raw.round, from_slot = raw.from_slot,
+                            chunk_seq = raw.chunk_seq, text = raw.text,
+                        })
+
+                    elseif tp == "chat.submit" and raw.from_slot == slot and raw.round == round then
+                        local kind = raw.kind or "npc"
+                        local _, werr = commit_chat_line(game_id, round, slot,
+                            tostring(raw.text or ""), chat_seq, kind)
+                        if werr then
+                            logger:error("[orchestrator] commit_chat_line failed",
+                                { slot = slot, err = tostring(werr) })
+                        end
+                        done_this_msg = true
+
+                    elseif tp == "chat.decline" and raw.from_slot == slot and raw.round == round then
+                        logger:info("[orchestrator] chat.decline", {
+                            slot = slot, msg_index = msg_index, reason = raw.reason,
+                        })
+                        done_this_msg = true
+
+                    elseif tp == "player.chat" then
+                        local text = tostring(raw.text or "")
+                        if text ~= "" then
+                            if is_mandatory then
+                                -- 1st msg in flight: commit interjection immediately; let NPC finish.
+                                local _, werr = commit_player_chat(game_id, round,
+                                    raw.from_slot or player_slot, text, chat_seq)
+                                if werr then
+                                    logger:warn("[orchestrator] commit_player_chat failed",
+                                        { err = tostring(werr) })
+                                end
+                                -- Keep waiting for NPC chat.submit.
+                            else
+                                -- 2nd optional msg: commit interjection first, then abort.
+                                local _, werr = commit_player_chat(game_id, round,
+                                    raw.from_slot or player_slot, text, chat_seq)
+                                if werr then
+                                    logger:warn("[orchestrator] commit_player_chat failed",
+                                        { err = tostring(werr) })
+                                end
+                                process.send(npc_pid, "abort.turn", {})
+                                done_this_msg = true
+                            end
+                        end
+                        -- Ignore other topics during day turn.
+
+                    end
+
+                elseif r.channel == per_speaker_ch then
+                    logger:warn("[orchestrator] per-speaker cap hit",
+                        { slot = slot, msg_index = msg_index })
+                    process.send(npc_pid, "abort.turn", {})
+                    done_this_msg = true
+
+                elseif (not day_deadline_fired) and r.channel == day_deadline then
+                    day_deadline_fired = true
+                    if msg_index > 1 then
+                        -- Mid 2nd-msg: abort and skip.
+                        process.send(npc_pid, "abort.turn", {})
+                        done_this_msg = true
+                    end
+                    -- Mid 1st-msg: let it finish (D-06).
+                end
+            end
+
+            if day_deadline_fired then
+                if msg_index == 1 and done_this_msg then break end
+                if msg_index > 1 then break end
+            end
+        end
+
+        if day_deadline_fired then break end
+        ::continue_slot::
+    end
+
+    -- Drain remaining chunks ~500ms so late submit/chunk don't leak into vote phase.
+    local drain_end = time.after("500ms")
+    while true do
+        local r = channel.select({ inbox:case_receive(), drain_end:case_receive() })
+        if not r.ok or r.channel == drain_end then break end
+    end
+
+    pe.publish_event("system", "chat_locked", "/" .. game_id, {
+        round = round,
+        reason = day_deadline_fired and "deadline" or "all_spoken",
+    })
+    emit_game_state_changed(game_id, alive, roles, slot_persona,
+        roster_names, player_slot, "vote", round, true)
     return true, nil
 end
 
@@ -670,6 +951,166 @@ local function run_vote_round(game_id, round, alive, roles, player_slot, npc_pid
     return true, nil
 end
 
+-- Phase 3: run_vote_round_llm.
+-- Same outer contract as run_vote_round but:
+--   - gathers full reasoning string from each vote.cast payload
+--   - publishes public/votes_revealed with per_voter array before persist_lynch
+--   - preserves Phase 2 tally + tie-handling logic
+--   - uses alive as the canonical and SOLE liveness field (Phase 2 invariant)
+-- Takes explicit state fields (chat_seq, roster_names, slot_persona) instead of
+-- the state table — avoids wippy-lint struct-shape union issues.
+local function run_vote_round_llm(game_id, round, alive, roles, player_slot, npc_pids,
+                                   force_tie, inbox, chat_seq, roster_names, slot_persona)
+    -- local helper: count table entries
+    local function count_map(t)
+        local n = 0
+        for _ in pairs(t) do n = n + 1 end
+        return n
+    end
+
+    -- Fan-out vote.prompt to all living NPCs (player excluded).
+    for slot = 1, 6 do
+        local npid = npc_pids[slot]
+        if alive[slot] and slot ~= player_slot and npid then
+            process.send(npid, "vote.prompt", { round = round })
+        end
+    end
+
+    -- Count living participants (NPCs + player) to know when collection is complete.
+    local needed = 0
+    for slot = 1, 6 do if alive[slot] then needed = needed + 1 end end
+
+    local votes_by_slot = {}  -- [slot] = { vote_for_slot, reasoning }
+    local vote_cap = time.after(dev_mode() and "10s" or "20s")
+    while true do
+        local r = channel.select({ inbox:case_receive(), vote_cap:case_receive() })
+        if not r.ok or r.channel == vote_cap then break end
+        local msg = r.value
+        if msg:topic() == "vote.cast" then
+            local raw = (msg:payload():data()) or {}
+            if raw.round == round and raw.from_slot and not votes_by_slot[raw.from_slot] then
+                votes_by_slot[raw.from_slot] = {
+                    vote_for_slot = raw.vote_for_slot,
+                    reasoning = tostring(raw.reasoning or ""),
+                }
+                if count_map(votes_by_slot) >= needed then break end
+            end
+        end
+        -- ignore other topics (late streaming chunks, etc.)
+    end
+
+    -- Persist votes with reasoning strings.
+    local db, db_err = sql.get("app:db")
+    if db_err or not db then return nil, "sql.get: " .. tostring(db_err) end
+    local now_ts = time.now():unix()
+    for slot, v in pairs(votes_by_slot) do
+        local _, werr = db:execute(
+            "INSERT OR REPLACE INTO votes (game_id, round, from_slot, vote_for_slot, reasoning, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            { game_id, round, slot, v.vote_for_slot, v.reasoning, now_ts }
+        )
+        if werr then
+            logger:error("[orchestrator] persist vote failed", { slot = slot, err = tostring(werr) })
+        end
+    end
+    db:release()
+
+    -- Tally.
+    local tally = {}
+    for _, v in pairs(votes_by_slot) do
+        if v.vote_for_slot and alive[v.vote_for_slot] then
+            tally[v.vote_for_slot] = (tally[v.vote_for_slot] or 0) + 1
+        end
+    end
+    local top_slot, top_count, tied = nil, 0, false
+    for s, c in pairs(tally) do
+        if c > top_count then top_slot = s; top_count = c; tied = false
+        elseif c == top_count then tied = true end
+    end
+    if force_tie then tied = true; top_slot = nil end
+
+    -- Build per_voter array (sorted by slot for deterministic UI output).
+    local per_voter = {}
+    for slot = 1, 6 do
+        if votes_by_slot[slot] then
+            table.insert(per_voter, {
+                from_slot = slot,
+                from_name = (roster_names and roster_names[slot]) or ("slot-" .. slot),
+                vote_for_slot = votes_by_slot[slot].vote_for_slot,
+                reasoning = votes_by_slot[slot].reasoning,
+            })
+        end
+    end
+
+    -- PUBLISH votes_revealed BEFORE lynch so UI can animate reveal.
+    pe.publish_event("public", "votes_revealed", "/" .. game_id, {
+        round = round, tally = tally, per_voter = per_voter,
+        top_slot = (not tied) and top_slot or nil, tied = tied,
+    })
+
+    if tied or not top_slot then
+        pe.publish_event("system", "vote.tied", "/" .. game_id, { round = round, tally = tally })
+        emit_game_state_changed(game_id, alive, roles, slot_persona,
+            roster_names, player_slot, "reveal", round, true)
+        return true, nil
+    end
+
+    -- Lynch top slot via Phase 2 persist_lynch (unchanged).
+    local revealed_role, lynch_err = persist_lynch(game_id, round, top_slot, roles)
+    if lynch_err then
+        logger:error("[orchestrator] persist_lynch failed", { err = tostring(lynch_err) })
+        return nil, lynch_err
+    end
+    -- Mark slot eliminated via alive (Phase 2 canonical field at orchestrator.lua:785).
+    -- No parallel eliminated-slot table exists; alive[slot] = false IS the canonical mutation.
+    alive[top_slot] = false
+
+    -- Last-words dispatch (NPC-09) — only for NPC slots, not the player.
+    local victim_pid = npc_pids[top_slot]
+    if top_slot ~= player_slot and victim_pid then
+        process.send(victim_pid, "eliminated", {
+            slot = top_slot, round = round, request_last_words = true,
+        })
+        local lw_deadline = time.after("12s")
+        while true do
+            local lwr = channel.select({ inbox:case_receive(), lw_deadline:case_receive() })
+            if not lwr.ok or lwr.channel == lw_deadline then break end
+            local m = lwr.value
+            if m:topic() == "chat.submit" then
+                local raw = (m:payload():data()) or {}
+                if raw.from_slot == top_slot and raw.kind == "last_words" then
+                    local top_slot_i = math.floor(tonumber(top_slot) or 0)
+                    local _, werr = commit_chat_line(game_id, round, top_slot_i,
+                        tostring(raw.text or ""), chat_seq, "last_words")
+                    if werr then
+                        logger:warn("[orchestrator] last_words commit failed",
+                            { err = tostring(werr) })
+                    end
+                    break
+                end
+            end
+        end
+    end
+
+    -- Publish elimination event.
+    pe.publish_event("public", "player.eliminated", "/" .. game_id, {
+        round = round, victim_slot = top_slot, cause = "lynch", revealed_role = revealed_role,
+    })
+    local victim_name = (roster_names and roster_names[top_slot]) or ("slot-" .. top_slot)
+    emit_game_state_changed_elim(game_id, alive, roles, slot_persona,
+        roster_names, player_slot, "reveal", round,
+        top_slot, victim_name, revealed_role, "lynch")
+
+    -- Cancel the victim NPC process so it exits cleanly.
+    if top_slot ~= player_slot and victim_pid then
+        pcall(process.cancel, victim_pid, "500ms")
+    end
+
+    logger:info("[orchestrator] llm lynch", {
+        round = round, victim_slot = top_slot, revealed_role = revealed_role,
+    })
+    return true, nil
+end
+
 -- check_win: D-20 rule.
 -- Returns 'villager' if living_mafia == 0,
 --         'mafia'    if living_mafia >= living_villagers (parity + majority),
@@ -797,23 +1238,62 @@ local function run(args)
     end
     state.roster = build_roster(state.roles)
 
-    -- 5. Spawn 5 stubs (slots 2..6 per D-02).
-    local npc_pids, spawn_err = spawn_stubs(game_id, state.roles, player_slot)
+    -- 4b. Phase 3: sample personas under real mode; stub names under stub mode.
+    local slot_persona = {}
+    local roster_names = {}
+    local name_to_slot = {}
+    if npc_mode() == "real" then
+        local personas = sampler.sample_personas(
+            persona_pool.ARCHETYPES, persona_pool.NAMES, 5, rng_seed)
+        local idx = 0
+        for slot = 1, 6 do
+            if slot == player_slot then
+                roster_names[slot] = "You"
+                name_to_slot["You"] = slot
+            else
+                idx = idx + 1
+                slot_persona[slot] = personas[idx]
+                roster_names[slot] = personas[idx].name
+                name_to_slot[personas[idx].name] = slot
+            end
+        end
+        logger:info("[orchestrator] personas sampled", {
+            game_id = game_id, roster = roster_names,
+        })
+    else
+        -- Stub mode: synthesize minimal names for audit/logs.
+        for slot = 1, 6 do
+            if slot == player_slot then
+                roster_names[slot] = "You"
+                name_to_slot["You"] = slot
+            else
+                roster_names[slot] = "stub-" .. tostring(slot)
+                name_to_slot[roster_names[slot]] = slot
+            end
+        end
+    end
+    state.slot_persona = slot_persona
+    state.roster_names = roster_names
+    state.name_to_slot = name_to_slot
+
+    -- 5. Spawn NPCs (routes to npc or npc_stub based on MAFIA_NPC_MODE).
+    local npc_pids, spawn_err = spawn_npcs(game_id, state.roles, player_slot,
+        slot_persona, roster_names, name_to_slot)
     if not npc_pids then
-        logger:error("[orchestrator] spawn_stubs failed", { err = tostring(spawn_err) })
+        logger:error("[orchestrator] spawn_npcs failed", { err = tostring(spawn_err) })
         return
     end
     state.npc_pids = npc_pids
 
     -- 6. Gather 5 readiness acks with 3s deadline (Pattern 1, Research Q1).
     local inbox = process.inbox()
-    local received, gather_err = gather_readiness(inbox, 5, "3s")  -- 5 NPC stubs at slots 2..6 (D-02)
+    local received, gather_err = gather_readiness(inbox, 5, "3s")  -- 5 NPCs at slots 2..6 (D-02)
     if gather_err then
         logger:error("[orchestrator] readiness gather timeout",
             { received = tostring(received), err = gather_err })
         return
     end
-    logger:info("[orchestrator] all stubs ready", { game_id = game_id })
+    logger:info("[orchestrator] all NPCs ready", { game_id = game_id })
 
     -- 7. Send orchestrator.ready -> game_manager with full payload for game.started reply.
     local player_role = state.roles[player_slot]
@@ -823,8 +1303,13 @@ local function run(args)
         player_role = player_role,
         player_slot = player_slot,
         roster = state.roster,
+        roster_names = roster_names,
         partner_slot = partner_slot,  -- nil unless mafia (ROLE-03/ROLE-04)
     })
+
+    -- Emit initial game_state_changed before the first night.
+    emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
+        state.roster_names, player_slot, "night", 0, false)
 
     -- 8. Post-INIT FSM loop (Plan 04).
     --    Night -> check_win -> Day -> Vote -> check_win -> loop | shutdown.
@@ -833,6 +1318,10 @@ local function run(args)
     local living_mafia, living_villagers
     while not winner do
         state.round = (state.round or 0) + 1
+
+        emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
+            state.roster_names, player_slot, "night", state.round, false)
+
         local ok_night, night_result = run_night_stub(
             game_id, state.round, rng_seed, state.alive, state.roles, state.npc_pids)
         if not ok_night then
@@ -845,18 +1334,40 @@ local function run(args)
         winner, living_mafia, living_villagers = check_win(state.alive, state.roles)
         if winner then break end
 
-        local ok_day, day_err = run_day_discussion(
-            game_id, state.round, state.alive, state.player_slot, state.npc_pids,
-            state.day_duration, state.pacing_ms, dev, state.chat_seq, inbox)
+        emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
+            state.roster_names, player_slot, "day", state.round, false)
+
+        local ok_day, day_err
+        if npc_mode() == "real" then
+            ok_day, day_err = run_day_discussion_streaming(
+                game_id, state.round, state.alive, state.player_slot, state.npc_pids,
+                dev, state.chat_seq, inbox,
+                state.rng_seed, state.roles, state.slot_persona, state.roster_names)
+        else
+            ok_day, day_err = run_day_discussion(
+                game_id, state.round, state.alive, state.player_slot, state.npc_pids,
+                state.day_duration, state.pacing_ms, dev, state.chat_seq, inbox)
+        end
         if not ok_day then
             logger:error("[orchestrator] run_day_discussion failed",
                 { err = tostring(day_err) })
             break
         end
 
-        local ok_vote, vote_err = run_vote_round(
-            game_id, state.round, state.alive, state.roles,
-            state.player_slot, state.npc_pids, state.force_tie, inbox)
+        emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
+            state.roster_names, player_slot, "vote", state.round, false)
+
+        local ok_vote, vote_err
+        if npc_mode() == "real" then
+            ok_vote, vote_err = run_vote_round_llm(
+                game_id, state.round, state.alive, state.roles,
+                state.player_slot, state.npc_pids, state.force_tie, inbox,
+                state.chat_seq, state.roster_names, state.slot_persona)
+        else
+            ok_vote, vote_err = run_vote_round(
+                game_id, state.round, state.alive, state.roles,
+                state.player_slot, state.npc_pids, state.force_tie, inbox)
+        end
         if not ok_vote then
             logger:error("[orchestrator] run_vote_round failed",
                 { err = tostring(vote_err) })
@@ -869,6 +1380,8 @@ local function run(args)
     end
 
     if winner then
+        emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
+            state.roster_names, player_slot, "ended", state.round, false)
         shutdown_cascade(game_id, state.round, winner,
             living_mafia, living_villagers, state.npc_pids)
         return { status = "ended", winner = winner, final_round = state.round }
