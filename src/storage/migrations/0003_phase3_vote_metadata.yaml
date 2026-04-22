@@ -1,0 +1,16 @@
+version: "1.0"
+namespace: app.storage.migrations
+
+entries:
+  - name: 0003_phase3_vote_metadata
+    kind: function.lua
+    meta:
+      type: migration
+      target_db: app:db
+      description: "Phase 3: add snapshot_json + npc_id columns to suspicion_snapshots"
+      depends_on: [ns:wippy.migration, app.storage.migrations:0002_errors_table]
+      timestamp: "2026-04-23T12:00:00Z"
+    source: file://0003_phase3_vote_metadata.lua
+    imports:
+      migration: wippy.migration:migration
+    method: migrate

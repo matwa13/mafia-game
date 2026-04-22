@@ -15,3 +15,11 @@ entries:
     source: file://visible_context.lua
     imports:
       pe: app.lib:events
+
+  - name: persona_pool
+    kind: library.lua
+    source: file://persona_pool.lua
+
+  - name: sampler
+    kind: library.lua
+    source: file://sampler.lua

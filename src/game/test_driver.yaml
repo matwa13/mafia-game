@@ -11,6 +11,13 @@ entries:
     storage: app:env
     variable: MAFIA_DEV_MODE
 
+  # D-08 (Phase 3): MAFIA_NPC_MODE controls NPC implementation.
+  # "stub" → npc_stub (Phase 2 regression), "real" → npc.lua (Phase 3+, default).
+  - name: mafia_npc_mode
+    kind: env.variable
+    storage: app:env
+    variable: MAFIA_NPC_MODE
+
   - name: test_driver
     kind: process.lua
     source: file://test_driver.lua
