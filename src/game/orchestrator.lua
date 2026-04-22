@@ -15,7 +15,7 @@ local channel = require("channel")
 local sql = require("sql")
 local uuid = require("uuid")
 local env = require("env")
--- pe is injected as an import alias; not used in Plan 02 but reserved for Plans 03/04.
+local pe = require("pe")  -- Phase 1 D-11 precedent: yaml imports pe -> app.lib:events
 
 local DAY_DURATION_PROD = "60s"
 local DAY_DURATION_DEV  = "3s"
@@ -147,6 +147,118 @@ local function build_roster(_roles)
     return roster
 end
 
+-- Phase 2 Plan 03: Night phase stub.
+--
+-- D-19: deterministic victim picker over the canonical 6-slot participant space (D-02).
+-- Round is 1-indexed. rng_seed is the seed from args.rng_seed.
+-- Algorithm: start from ((round + rng_seed) mod 6) + 1; if not alive OR is mafia, advance
+-- through slots 1..6 until first alive villager is found.
+local function pick_night_victim(round, rng_seed, alive, roles)
+    local start = ((round + rng_seed) % 6) + 1  -- 6 = canonical participant count (D-02)
+    for offset = 0, 5 do
+        local slot = ((start - 1 + offset) % 6) + 1
+        if alive[slot] and roles[slot] == "villager" then
+            return slot
+        end
+    end
+    -- no alive villager (terminal state — caller should check win before entering night)
+    return nil
+end
+
+-- Pick the mafia actor: lowest-slot mafia still alive.
+local function pick_night_actor(alive, roles)
+    for slot = 1, 6 do  -- 6 = canonical participant count (D-02)
+        if alive[slot] and roles[slot] == "mafia" then
+            return slot
+        end
+    end
+    return nil
+end
+
+-- run_night_stub: atomic 3-write tx + night.resolved publish.
+-- Returns true, nil on success or nil, err_string on failure.
+-- CONTRACT (SETUP-05): SQL rows committed BEFORE publish_event fires.
+-- Schema authority: src/storage/migrations/0001_initial_schema.lua
+--   night_actions columns: (game_id, round, actor_slot, target_slot, created_at)
+--   eliminations columns:  (game_id, round, victim_slot, cause, revealed_role, created_at)
+-- D-18: eliminations.cause = "night" (not "kill"; authority 02-RESEARCH.md §Pattern 3 + 02-CONTEXT.md D-18).
+-- Takes the specific fields it needs (avoids wippy-lint struct-shape union issue
+-- when the caller's state table has 13+ fields).
+-- Mutates `alive[victim_slot] = false` and returns new_round + victim_slot so the
+-- caller can update state.round and dispatch dead-flag side-effects.
+local function run_night_stub(game_id, round, rng_seed, alive, roles, npc_pids)
+    local actor_slot = pick_night_actor(alive, roles)
+    if not actor_slot then
+        return nil, "no living mafia (game should have ended)"
+    end
+    local victim_slot = pick_night_victim(round, rng_seed, alive, roles)
+    if not victim_slot then
+        return nil, "no living villager (game should have ended)"
+    end
+    local revealed_role = roles[victim_slot]
+
+    local db, db_err = sql.get("app:db")
+    if db_err or not db then
+        return nil, "sql.get: " .. tostring(db_err)
+    end
+    local tx, tx_err = db:begin()
+    if tx_err then
+        db:release()
+        return nil, "begin: " .. tostring(tx_err)
+    end
+    local now_ts = time.now():unix()
+    local ok, err = pcall(function()
+        local _, e1 = tx:execute(
+            "INSERT INTO night_actions (game_id, round, actor_slot, target_slot, created_at) VALUES (?, ?, ?, ?, ?)",
+            { game_id, round, actor_slot, victim_slot, now_ts }
+        )
+        assert(not e1, "night_actions.insert: " .. tostring(e1))
+        local _, e2 = tx:execute(
+            "INSERT INTO eliminations (game_id, round, victim_slot, cause, revealed_role, created_at) VALUES (?, ?, ?, 'night', ?, ?)",
+            { game_id, round, victim_slot, revealed_role, now_ts }
+        )
+        assert(not e2, "eliminations.insert: " .. tostring(e2))
+        local _, e3 = tx:execute(
+            "UPDATE players SET alive = 0, died_round = ?, died_cause = 'night' WHERE game_id = ? AND slot = ?",
+            { round, game_id, victim_slot }
+        )
+        assert(not e3, "players.update: " .. tostring(e3))
+    end)
+    if not ok then
+        tx:rollback()
+        db:release()
+        return nil, "tx failed: " .. tostring(err)
+    end
+    local _, commit_err = tx:commit()
+    db:release()
+    if commit_err then
+        return nil, "commit: " .. tostring(commit_err)
+    end
+
+    -- SETUP-05: SQL committed above; now mutate in-memory state and emit the event.
+    alive[victim_slot] = false
+
+    -- D-13 belt-and-suspenders: notify the eliminated stub so it sets dead=true.
+    local victim_pid = npc_pids[victim_slot]
+    if victim_pid then
+        process.send(victim_pid, "eliminated", { slot = victim_slot, round = round })
+    end
+
+    pe.publish_event("system", "night.resolved", "/" .. game_id, {
+        round = round,
+        victim_slot = victim_slot,
+        cause = "night",
+        revealed_role = revealed_role,
+        actor_slot = actor_slot,
+    })
+
+    logger:info("[orchestrator] night resolved", {
+        round = round, victim_slot = victim_slot,
+        revealed_role = revealed_role, actor_slot = actor_slot,
+    })
+    return true, victim_slot
+end
+
 local function run(args)
     args = args or {}
     local game_id = args.game_id
@@ -174,6 +286,10 @@ local function run(args)
 
     -- 3. Timing mode (D-22).
     local dev = dev_mode()
+    -- Resolve duration/pacing into locally-typed string/integer to avoid the lint's
+    -- literal-union narrowing on the state-table constructor.
+    local day_duration_str = dev and DAY_DURATION_DEV or DAY_DURATION_PROD
+    local pacing_ms_int = dev and PACING_DEV_MS or PACING_PROD_MS
     local state = {
         game_id = game_id,
         rng_seed = rng_seed,
@@ -181,14 +297,17 @@ local function run(args)
         force_tie = force_tie,
         driver_pid = driver_pid,
         gm_pid = gm_pid,
-        day_duration = dev and DAY_DURATION_DEV or DAY_DURATION_PROD,
-        pacing_ms = dev and PACING_DEV_MS or PACING_PROD_MS,
+        day_duration = tostring(day_duration_str),
+        pacing_ms = tonumber(pacing_ms_int) or 500,
         round = 0,
         roles = nil,
         roster = nil,
         npc_pids = {},
-        alive = { [1] = true, [2] = true, [3] = true, [4] = true, [5] = true, [6] = true },  -- 6 slots (D-02)
+        alive = {},  -- populated below to avoid literal-tuple type narrowing
     }
+    -- D-02: 6 slots, all initially alive. Assigned outside the constructor so the
+    -- lint infers `{[integer]: boolean}` rather than a fixed 6-element true-tuple.
+    for slot = 1, 6 do state.alive[slot] = true end
     logger:info("[orchestrator] INIT", {
         game_id = game_id, dev_mode = dev,
         day_duration = state.day_duration, pacing_ms = state.pacing_ms,
@@ -232,9 +351,17 @@ local function run(args)
         partner_slot = partner_slot,  -- nil unless mafia (ROLE-03/ROLE-04)
     })
 
-    -- 8. Placeholder main loop (Plans 03/04 replace with full FSM).
-    --    Plan 02 scope: await CANCEL. Our children are linked so we MUST stay alive
-    --    until CANCEL; otherwise cancel-cascade kills stubs before V-02-02 observes post-INIT state.
+    -- 8. Post-INIT game loop.
+    --    Plan 03 adds Night + Day; Plan 04 replaces the park with run_vote_round + check_win + cascade.
+    state.round = (state.round or 0) + 1
+    local ok_night, night_result = run_night_stub(
+        game_id, state.round, rng_seed, state.alive, state.roles, state.npc_pids)
+    if not ok_night then
+        logger:error("[orchestrator] run_night_stub failed", { err = tostring(night_result) })
+        -- Plan 04 adds clean-shutdown path; Plan 03 logs and parks on CANCEL.
+    end
+
+    -- Placeholder park on CANCEL (Plan 04 replaces with run_vote_round + check_win + cascade).
     local proc_ev = process.events()
     while true do
         local r = channel.select({ inbox:case_receive(), proc_ev:case_receive() })
@@ -249,7 +376,7 @@ local function run(args)
         elseif r.channel == inbox then
             -- Plan 03/04 dispatch chat.submit, vote.cast, etc.
             local topic_ok, topic = pcall(function() return r.value:topic() end)
-            logger:debug("[orchestrator] inbox (Plan 02 placeholder)",
+            logger:debug("[orchestrator] inbox (Plan 03 placeholder)",
                 { topic = topic_ok and tostring(topic) or "<?>" })
         end
     end
