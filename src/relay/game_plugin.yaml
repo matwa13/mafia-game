@@ -1,0 +1,21 @@
+version: "1.0"
+namespace: app.relay
+
+entries:
+  # Game relay plugin — transport adapter for client <-> game orchestrator traffic.
+  # AP2-compliant: holds ONLY {conn_pid, active_game_id, orch_pid, player_slot}.
+  # Discovered by wippy/relay user hub at startup via
+  # registry.find({kind=process.*, meta.type=relay.plugin}).
+  - name: game_plugin
+    kind: process.lua
+    meta:
+      type: relay.plugin
+      command_prefix: game_
+      auto_start: true
+    source: file://game_plugin.lua
+    method: run
+    modules:
+      - logger
+      - events
+      - channel
+      - time
