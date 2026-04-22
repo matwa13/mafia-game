@@ -67,7 +67,6 @@ local function run(args)
         if not r.ok then break end
 
         if r.channel == inbox then
-            -- Task 2 fills in dispatch for topics: start, chat_send, vote_cast.
             local msg = r.value
             local topic = msg and msg:topic() or ""
             local payload = (msg and msg:payload() and msg:payload():data()) or {}
@@ -78,11 +77,96 @@ local function run(args)
                 conns[conn_pid] = { joined_at = time.now():unix() }
             end
 
-            -- TODO Task 2: dispatch start / chat_send / vote_cast.
-            -- TODO Task 2: also handle "game.started" reply from game_manager.
+            if topic == "start" then
+                -- Look up game_manager, send game.start, wait inline <=5s for game.started reply.
+                local gm_pid = process.registry.lookup("app.game:game_manager")
+                if not gm_pid then
+                    forward(conn_pid, "game_error", { code = "NO_GAME_MANAGER" })
+                else
+                    process.send(gm_pid, "game.start", {
+                        driver_pid = process.pid(),
+                        seed = data.seed,
+                        player_slot = 1,      -- MVP: human is always slot 1 (Phase 0 hardcode)
+                        force_tie = data.force_tie == true,
+                    })
+                    -- Inline wait for the game.started reply (Phase 2 response contract).
+                    local wait_deadline = time.after("5s")
+                    local got_reply = false
+                    while not got_reply do
+                        local wait_r = channel.select({
+                            inbox:case_receive(),
+                            wait_deadline:case_receive(),
+                        })
+                        if not wait_r.ok or wait_r.channel == wait_deadline then
+                            forward(conn_pid, "game_error", { code = "GAME_START_TIMEOUT" })
+                            break
+                        end
+                        local reply_msg = wait_r.value
+                        local reply_topic = reply_msg and reply_msg:topic() or ""
+                        if reply_topic == "game.started" then
+                            local started = (reply_msg:payload() and reply_msg:payload():data()) or {}
+                            local orch_pid = process.registry.lookup("game:" .. tostring(started.game_id))
+                            if not orch_pid then
+                                forward(conn_pid, "game_error", { code = "ORCH_NOT_FOUND" })
+                                got_reply = true
+                                break
+                            end
+                            active = {
+                                game_id = started.game_id,
+                                orch_pid = orch_pid,
+                                player_slot = started.player_slot or 1,
+                            }
+                            subscribe_to_game(started.game_id)
+                            forward(conn_pid, "game_state_changed", {
+                                phase = "starting",
+                                game_id = started.game_id,
+                                player_slot = active.player_slot,
+                            })
+                            got_reply = true
+                        elseif reply_topic == "game.start.failed" then
+                            local ferr = (reply_msg:payload() and reply_msg:payload():data()) or {}
+                            forward(conn_pid, "game_error", {
+                                code = "GAME_START_FAILED", error = tostring(ferr.error or "unknown"),
+                            })
+                            got_reply = true
+                        end
+                        -- Any other topic during the wait window is dropped (no active game yet).
+                    end
+                end
 
-            logger:debug("[game_plugin] inbox (scaffold)",
-                { topic = tostring(topic), conn_pid = tostring(conn_pid) })
+            elseif topic == "chat_send" and active then
+                -- Override from_slot with server-known player_slot (Spoofing T-03-01).
+                -- Clamp text length (Input Validation V5).
+                local text = tostring(data.text or "")
+                if #text > MAX_CHAT_CHARS then text = text:sub(1, MAX_CHAT_CHARS) end
+                if text ~= "" then
+                    process.send(active.orch_pid, "player.chat", {
+                        text = text,
+                        from_slot = active.player_slot,
+                        round = data.round,
+                        conn_pid = conn_pid,
+                    })
+                end
+
+            elseif topic == "vote_cast" and active then
+                -- Override from_slot with server-known player_slot (Spoofing).
+                -- Clamp vote_for_slot to a sane range (V5).
+                local vfs = tonumber(data.vote_for_slot)
+                if vfs and (vfs < 1 or vfs > 6) then vfs = nil end
+                process.send(active.orch_pid, "vote.cast", {
+                    from_slot = active.player_slot,
+                    vote_for_slot = vfs,
+                    reasoning = "player",
+                    round = tonumber(data.round) or 0,
+                })
+
+            elseif not active then
+                logger:debug("[game_plugin] command with no active game; ignoring",
+                    { topic = tostring(topic) })
+            else
+                logger:debug("[game_plugin] unknown post-strip topic",
+                    { topic = tostring(topic) })
+            end
 
         elseif (chat_ch and r.channel == chat_ch) or (sys_ch and r.channel == sys_ch) then
             -- TODO Task 3: forward events to conn_pid based on evt.kind mapping.
