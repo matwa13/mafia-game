@@ -169,10 +169,39 @@ local function run(args)
             end
 
         elseif (chat_ch and r.channel == chat_ch) or (sys_ch and r.channel == sys_ch) then
-            -- TODO Task 3: forward events to conn_pid based on evt.kind mapping.
-            logger:debug("[game_plugin] event (scaffold)", {
-                kind = r.value and r.value.kind, path = r.value and r.value.path,
-            })
+            local evt = r.value
+            if not evt or not active then
+                -- drop — no active game or nil event
+            elseif evt.path ~= "/" .. active.game_id then
+                -- different game — drop
+            else
+                -- kind -> client_topic mapping
+                local kind = evt.kind
+                local client_topic_map = {
+                    ["chat.chunk"]          = "game_chat_chunk",
+                    ["chat.line"]           = "game_chat_line",
+                    ["chat_locked"]         = "game_chat_locked",
+                    ["player.eliminated"]   = "game_eliminated",
+                    ["night.resolved"]      = "game_eliminated",  -- same client shape (Phase 4 ready)
+                    ["vote.tied"]           = "game_vote_tied",
+                    ["votes_revealed"]      = "game_votes_revealed",
+                    ["game.ended"]          = "game_game_ended",
+                    ["game_state_changed"]  = "game_state_changed",
+                    ["npc_turn_skipped"]    = "game_npc_skipped",  -- diagnostic for UI toast
+                }
+                local ct = client_topic_map[kind]
+                if ct then
+                    for cpid, _ in pairs(conns) do
+                        forward(cpid, ct, evt.data or {})
+                    end
+                end
+                -- Pitfall 9: on game.ended, drop subscriptions + clear active so next game starts fresh.
+                if kind == "game.ended" then
+                    unsubscribe()
+                    active = nil
+                    logger:info("[game_plugin] game ended; cleared active state")
+                end
+            end
 
         elseif r.channel == proc_ev then
             local ev = r.value
