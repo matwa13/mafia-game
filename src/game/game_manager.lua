@@ -15,6 +15,99 @@ local channel = require("channel")
 local sql = require("sql")
 local uuid = require("uuid")
 
+-- Phase 2 Plan 04: orchestrator lifecycle dispatch (D-05 abandoned-game policy).
+--
+-- Pitfall 4 (spawn_linked_monitored fires BOTH EXIT and LINK_DOWN on crash):
+-- On the first signal we classify crash-vs-clean, write games row if needed,
+-- and flip record.handled=true. The second signal no-ops via the handled guard.
+
+local function find_record_by_pid(state, pid)
+    for game_id, record in pairs(state.active_games) do
+        if record.orch_pid == pid then return game_id, record end
+    end
+    return nil, nil
+end
+
+-- Mark a game abandoned: UPDATE games SET ended_at, winner='abandoned'.
+-- Crash path only — clean end writes games.winner='mafia'|'villager' from
+-- the orchestrator's shutdown_cascade.
+local function mark_abandoned(game_id)
+    local db, db_err = sql.get("app:db")
+    if db_err or not db then return nil, "sql.get: " .. tostring(db_err) end
+    local _, exec_err = db:execute(
+        "UPDATE games SET ended_at = ?, winner = ? WHERE id = ?",
+        { time.now():unix(), "abandoned", game_id }
+    )
+    db:release()
+    if exec_err then return nil, "games.update: " .. tostring(exec_err) end
+    return true, nil
+end
+
+-- Handle one EXIT or LINK_DOWN. Dual-signal dedupe via record.handled.
+local function handle_process_event(state, event)
+    if not event then return end
+    if event.kind ~= process.event.EXIT and event.kind ~= process.event.LINK_DOWN then
+        return
+    end
+    local game_id, record = find_record_by_pid(state, event.from)
+    if not record or not game_id then
+        logger:debug("[game_manager] proc_ev from unknown pid",
+            { from = tostring(event.from), kind = tostring(event.kind) })
+        return
+    end
+    if record.handled then
+        -- Second signal from the double-fire; already processed.
+        return
+    end
+
+    -- Classify: crash vs. clean-end.
+    -- Clean end: orchestrator returned { status = "ended", winner = ... }.
+    -- Crash:     LINK_DOWN, OR EXIT with result.error, OR EXIT with missing/wrong status.
+    local was_crash = false
+    if event.kind == process.event.LINK_DOWN then
+        was_crash = true
+    elseif event.kind == process.event.EXIT then
+        local result = event.result
+        if not result or (type(result) == "table" and result.status ~= "ended") then
+            was_crash = true
+        end
+        if type(result) == "table" and result.error then
+            was_crash = true
+        end
+    end
+
+    if was_crash then
+        local ok, err = mark_abandoned(game_id)
+        if not ok then
+            logger:error("[game_manager] mark_abandoned failed",
+                { game_id = game_id, err = tostring(err) })
+        else
+            logger:info("[game_manager] game abandoned (crash)",
+                { game_id = game_id, kind = tostring(event.kind) })
+        end
+    else
+        logger:info("[game_manager] game ended cleanly",
+            { game_id = game_id, result = tostring(event.result) })
+    end
+
+    record.handled = true
+    state.active_games[game_id] = nil
+end
+
+-- CANCEL cascade: cancel every live orchestrator when game_manager itself is cancelled.
+-- Pitfall 3: explicit cancel required; clean parent return does not auto-cancel children.
+local function shutdown_cascade_gm(state)
+    local count = 0
+    for _, record in pairs(state.active_games) do
+        local orch_pid = record.orch_pid
+        if type(orch_pid) == "string" then
+            process.cancel(orch_pid, "1s")
+            count = count + 1
+        end
+    end
+    logger:info("[game_manager] cascade-cancelled orchestrators", { count = count })
+end
+
 -- Insert a fresh games row at the moment game.start is received.
 local function insert_game_row(game_id, rng_seed, player_slot)
     local db, db_err = sql.get("app:db")
@@ -163,12 +256,13 @@ local function run(_args)
         elseif r.channel == proc_ev then
             local event = r.value
             if event and event.kind == process.event.CANCEL then
-                logger:info("[game_manager] CANCEL received; exiting cleanly")
+                logger:info("[game_manager] CANCEL received; cascading and exiting")
+                shutdown_cascade_gm(state)
                 break
             end
-            -- Plan 04 adds EXIT/LINK_DOWN abandoned-game bookkeeping with `handled` dedupe.
-            logger:debug("[game_manager] proc event (Plan 04 wires)",
-                { kind = tostring(event and event.kind) })
+            -- EXIT + LINK_DOWN from orchestrator children (spawn_linked_monitored
+            -- fires BOTH on crash — handle_process_event dedupes via record.handled).
+            handle_process_event(state, event)
         end
     end
 
