@@ -4,7 +4,8 @@
 -- Phase 3 form:        render_stable_block(args) where args is the full parameterised table.
 -- No clocks, no RNG, no env reads — pure string assembly.
 
-local persona_pool = require("persona_pool")
+local persona_pool  = require("persona_pool")
+local persona_rules = require("persona_rules")
 
 local FIXTURE = {
     name      = "Mira Kapoor",
@@ -13,18 +14,10 @@ local FIXTURE = {
     traits    = { "cautious", "detail-oriented", "second-guesses herself" },
 }
 
--- Game rules block — inlined so render_stable_block stays pure.
-local RULES = [[
-You are playing Mafia, a social deduction game.
-Roles: 1 human + 5 NPC players; 2 are Mafia, 4 are Villagers.
-Mafia know each other; Villagers do not know anyone else's role.
-Each round: a night phase (Mafia eliminate one player) then a day phase
-(discussion followed by a vote to lynch one suspected player).
-Villagers win when all Mafia are eliminated; Mafia win when living Mafia
-are equal to or outnumber living Villagers.
-You speak in character as the persona described below. Stay in voice;
-do not describe the game mechanically.
-]]
+-- Game rules block — pulled from persona_rules so the [[ ]] literal lives
+-- in its own tiny module and can't cascade into this file's highlighting.
+-- Byte-identical to the Phase 1 shipped RULES string (D-15 SHA-256 anchor).
+local RULES = persona_rules.RULES
 
 -- Phase 1 render path — kept byte-identical to the original.
 local function render_phase1(fixture, role)

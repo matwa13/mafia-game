@@ -6,7 +6,8 @@
 local pe = require("pe")
 
 local function visible_context(npc_id, state, mode)
-    mode = mode or "chat"
+    -- Normalise mode: accept "vote" or default to "chat".
+    local render_mode = (mode == "vote") and "vote" or "chat"
     local lines = {}
 
     -- 1. ROSTER BLOCK (NPC-06 — NPCs need names to address each other)
@@ -32,8 +33,8 @@ local function visible_context(npc_id, state, mode)
         table.insert(lines, event.kind .. ": " .. (event.text or ""))
     end
 
-    -- 3. SUSPICION (mode == "vote" ONLY — D-16: suspicion is vote-only)
-    if mode == "vote" and state.suspicion then
+    -- 3. SUSPICION (render_mode == "vote" ONLY — D-16: suspicion is vote-only)
+    if render_mode == "vote" and state.suspicion then
         table.insert(lines, "")
         table.insert(lines, "===YOUR PRIVATE SUSPICION STATE===")
         for slot, entry in pairs(state.suspicion) do
