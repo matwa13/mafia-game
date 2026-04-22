@@ -259,6 +259,193 @@ local function run_night_stub(game_id, round, rng_seed, alive, roles, npc_pids)
     return true, victim_slot
 end
 
+-- Phase 2 Plan 03: Day discussion phase.
+--
+-- D-15 invariant: this helper is the SOLE writer of the `messages` table and the
+-- SOLE publisher of `chat.line` events in the entire repo. Plan 05's audit-grep
+-- gate (V-02-10) enforces at build time.
+--
+-- D-16/LOOP-06: per-speaker turn races a day-level deadline with a 1s drain that
+-- lets the current speaker finish after the deadline fires.
+--
+-- Schema authority: src/storage/migrations/0001_initial_schema.lua
+--   messages columns: (game_id, round, seq, phase, from_slot, kind, text, created_at)
+--   phase='day' + kind='npc' are hardcoded in the INSERT (PLAN.md interface block
+--   was missing these NOT-NULL columns; authority is the live schema + 02-RESEARCH.md
+--   §"Orchestrator chat.submit handler" lines 786-791).
+
+-- Build the speaking order for the current round: alive slots in ascending order,
+-- EXCLUDING the human player (player_slot). Phase 2 test_driver does not simulate
+-- human chat; Phase 3 wires the human-chat path.
+local function speaking_order(alive, player_slot)
+    local order = {}
+    for slot = 1, 6 do  -- 6 = canonical participant count (D-02)
+        if alive[slot] and slot ~= player_slot then
+            table.insert(order, slot)
+        end
+    end
+    return order
+end
+
+-- Write one message row and publish chat.line. SOLE site that mutates chat_seq
+-- and SOLE publisher of `chat.line`. SETUP-05: INSERT precedes publish_event.
+-- Returns the assigned seq on success, or nil + err on failure.
+local function commit_chat_line(game_id, round, from_slot, text, chat_seq)
+    chat_seq[round] = (chat_seq[round] or 0) + 1
+    local seq = chat_seq[round]
+
+    local db, db_err = sql.get("app:db")
+    if db_err or not db then
+        return nil, "sql.get: " .. tostring(db_err)
+    end
+    local _, exec_err = db:execute(
+        "INSERT INTO messages (game_id, round, seq, phase, from_slot, kind, text, created_at) VALUES (?, ?, ?, 'day', ?, 'npc', ?, ?)",
+        { game_id, round, seq, from_slot, text, time.now():unix() }
+    )
+    db:release()
+    if exec_err then
+        return nil, "messages.insert: " .. tostring(exec_err)
+    end
+
+    -- SETUP-05: publish AFTER successful INSERT.
+    pe.publish_event("public", "chat.line", "/" .. game_id, {
+        round = round,
+        seq = seq,
+        from_slot = from_slot,
+        text = text,
+    })
+    return seq, nil
+end
+
+-- run_day_discussion: one speaker at a time; per-speaker cap + day-level deadline
+-- with a 1s drain so the current speaker gets to finish if the deadline fires.
+--
+-- Uses `time.after(state.day_duration)` for the day-level deadline (one-shot,
+-- created ONCE per phase — Pitfall 2). Per-speaker caps are fresh per iteration.
+--
+-- PLAN.md verify-grep expects `channel.after(state.day_duration)`; that is a
+-- stale-API reference — `channel.after` does not exist in the Wippy runtime.
+-- All in-repo deadlines use `time.after(...)`. Authority: src/probes/probe.lua,
+-- src/npc/test_driver.lua, src/npc/npc_test.lua (Rule 1 — using the real API).
+local function run_day_discussion(game_id, round, alive, player_slot, npc_pids,
+                                  day_duration, pacing_ms, dev, chat_seq, inbox)
+    local order = speaking_order(alive, player_slot)
+    if #order == 0 then
+        logger:warn("[orchestrator] run_day_discussion: empty speaking order")
+        pe.publish_event("system", "chat_locked", "/" .. game_id, {
+            round = round, reason = "no-speakers",
+        })
+        return true, nil
+    end
+
+    -- Pitfall 2: ONE day-level deadline for the entire phase.
+    local deadline_ch = time.after(day_duration)
+    local deadline_fired = false
+
+    local per_speaker_cap = dev and "2s" or "5s"  -- Research Q2 — wide per-speaker cap
+
+    for _, slot in ipairs(order) do
+        local npc_pid = npc_pids[slot]
+        if not npc_pid then
+            logger:warn("[orchestrator] no pid for slot", { slot = slot })
+        else
+            process.send(npc_pid, "day.turn", {
+                round = round,
+                pacing_ms = pacing_ms,
+            })
+
+            -- Wait for this speaker's chat.submit OR deadline OR per-speaker cap.
+            -- Pitfall 2: per_speaker_ch is fresh each iteration (one-shot).
+            local per_speaker_ch = time.after(per_speaker_cap)
+            local got_reply = false
+
+            while not got_reply do
+                local cases = {
+                    inbox:case_receive(),
+                    per_speaker_ch:case_receive(),
+                }
+                if not deadline_fired then
+                    table.insert(cases, deadline_ch:case_receive())
+                end
+                local r = channel.select(cases)
+                if not r.ok then
+                    return nil, "channel closed during day"
+                end
+
+                if r.channel == inbox then
+                    local msg = r.value
+                    local topic_ok, topic = pcall(function() return msg:topic() end)
+                    if not topic_ok then
+                        logger:warn("[orchestrator] bad msg during day")
+                    elseif topic == "chat.submit" then
+                        local raw = msg:payload():data()
+                        local reply_slot = (type(raw) == "table" and raw.slot) or nil
+                        local reply_round = (type(raw) == "table" and raw.round) or nil
+                        local text = (type(raw) == "table" and raw.text) or ""
+                        local dead = (type(raw) == "table" and raw.dead) or false
+
+                        if reply_slot == slot and reply_round == round then
+                            if not dead and text and text ~= "" then
+                                local _, write_err = commit_chat_line(
+                                    game_id, round, slot, tostring(text), chat_seq)
+                                if write_err then
+                                    logger:error("[orchestrator] commit_chat_line failed",
+                                        { slot = slot, err = write_err })
+                                end
+                            end
+                            got_reply = true
+                        else
+                            logger:debug("[orchestrator] stale/mismatched chat.submit (drop)",
+                                { expected_slot = slot, got_slot = tostring(reply_slot),
+                                  expected_round = round, got_round = tostring(reply_round) })
+                        end
+                    else
+                        -- any other inbox topic: defer handling to Plan 04 main loop
+                        logger:debug("[orchestrator] non-chat inbox during day",
+                            { topic = tostring(topic) })
+                    end
+                elseif r.channel == per_speaker_ch then
+                    logger:warn("[orchestrator] per-speaker timeout", { slot = slot })
+                    got_reply = true  -- advance past this speaker
+                elseif (not deadline_fired) and r.channel == deadline_ch then
+                    deadline_fired = true
+                    logger:info("[orchestrator] day deadline fired",
+                        { round = round, current_speaker = slot })
+                    -- Pattern 2 drain: let the CURRENT speaker finish, then exit
+                    -- the outer loop. Continue the inner `while not got_reply` loop
+                    -- WITHOUT the deadline case (capped by per_speaker_cap).
+                end
+            end
+        end
+
+        if deadline_fired then
+            break  -- current speaker has finished (drain complete); skip remaining speakers
+        end
+    end
+
+    -- If deadline fired during or after the final speaker, grant a 1s post-loop
+    -- drain so any straggler chat.submit lands silently (best-effort, no publish).
+    if deadline_fired then
+        local drain = time.after("1s")
+        local draining = true
+        while draining do
+            local r = channel.select({ inbox:case_receive(), drain:case_receive() })
+            if not r.ok or r.channel ~= inbox then
+                draining = false
+            else
+                logger:debug("[orchestrator] drain-dropping post-deadline msg")
+            end
+        end
+    end
+
+    local reason = deadline_fired and "deadline" or "all-done"
+    pe.publish_event("system", "chat_locked", "/" .. game_id, {
+        round = round, reason = reason,
+    })
+    logger:info("[orchestrator] day complete", { round = round, reason = reason })
+    return true, nil
+end
+
 local function run(args)
     args = args or {}
     local game_id = args.game_id
@@ -304,6 +491,7 @@ local function run(args)
         roster = nil,
         npc_pids = {},
         alive = {},  -- populated below to avoid literal-tuple type narrowing
+        chat_seq = {},  -- per-round message counter; written by commit_chat_line
     }
     -- D-02: 6 slots, all initially alive. Assigned outside the constructor so the
     -- lint infers `{[integer]: boolean}` rather than a fixed 6-element true-tuple.
@@ -359,6 +547,14 @@ local function run(args)
     if not ok_night then
         logger:error("[orchestrator] run_night_stub failed", { err = tostring(night_result) })
         -- Plan 04 adds clean-shutdown path; Plan 03 logs and parks on CANCEL.
+    else
+        local ok_day, day_err = run_day_discussion(
+            game_id, state.round, state.alive, state.player_slot, state.npc_pids,
+            state.day_duration, state.pacing_ms, dev, state.chat_seq, inbox)
+        if not ok_day then
+            logger:error("[orchestrator] run_day_discussion failed",
+                { err = tostring(day_err) })
+        end
     end
 
     -- Placeholder park on CANCEL (Plan 04 replaces with run_vote_round + check_win + cascade).
