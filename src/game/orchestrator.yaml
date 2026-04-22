@@ -11,6 +11,7 @@ entries:
       - time
       - sql
       - uuid
+      - env
     imports:
       pe: app.lib:events
     method: run

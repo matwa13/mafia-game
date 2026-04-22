@@ -2,6 +2,15 @@ version: "1.0"
 namespace: app.game
 
 entries:
+  # D-22: MAFIA_DEV_MODE env declaration. env.get() only sees keys that are
+  # registered as env.variable entries against a storage (env.storage.file
+  # .env values are NOT surfaced to env.get() without this declaration).
+  # Both test_driver.lua and orchestrator.lua read this key.
+  - name: mafia_dev_mode
+    kind: env.variable
+    storage: app:env
+    variable: MAFIA_DEV_MODE
+
   - name: test_driver
     kind: process.lua
     source: file://test_driver.lua

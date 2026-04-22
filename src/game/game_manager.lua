@@ -63,15 +63,22 @@ local function handle_process_event(state, event)
     -- Classify: crash vs. clean-end.
     -- Clean end: orchestrator returned { status = "ended", winner = ... }.
     -- Crash:     LINK_DOWN, OR EXIT with result.error, OR EXIT with missing/wrong status.
+    --
+    -- Wippy wraps the process return value in `event.result = { value = <return-value> }`.
+    -- So the orchestrator's `return { status = "ended", ... }` lands at `event.result.value`.
+    -- (Discovered during Phase 2 Plan 05 smoke run; Plan 04 wrote this as `event.result`
+    -- directly, which classified every clean-end as a crash → games.winner overwritten
+    -- to 'abandoned' right after orchestrator correctly wrote 'mafia' / 'villager'.)
     local was_crash = false
     if event.kind == process.event.LINK_DOWN then
         was_crash = true
     elseif event.kind == process.event.EXIT then
-        local result = event.result
-        if not result or (type(result) == "table" and result.status ~= "ended") then
+        local wrapped = event.result
+        local inner = (type(wrapped) == "table") and wrapped.value or nil
+        if type(inner) ~= "table" or inner.status ~= "ended" then
             was_crash = true
         end
-        if type(result) == "table" and result.error then
+        if type(inner) == "table" and inner.error then
             was_crash = true
         end
     end

@@ -30,8 +30,29 @@ end
 -- NOTE: literal 6 below is the canonical participant count per D-02 (1 human slot 1 + 5 NPC slots 2..6).
 local function pick_vote(from_slot, round, alive_slots, force_tie)
     if force_tie then
-        -- force_tie override: everyone votes slot ((round % 6) + 1), biasing toward one slot
-        return (round % 6) + 1
+        -- force_tie: balance the NPC vote across a deterministic pair of
+        -- target slots (A, B) drawn from the two lowest alive slots that are
+        -- NOT slot 2 (the player driver-stub's default vote per orchestrator
+        -- gather_votes) and NOT self. Each stub picks A if (from_slot % 2 == 0),
+        -- else B (and flips the choice when the parity pick equals self).
+        -- With 4 living NPC voters and evenly-parity-distributed slots, the
+        -- tally lands on exactly 2 votes for A and 2 for B, producing a tie.
+        local pair = {}
+        for s = 1, 6 do
+            if alive_slots[s] and s ~= from_slot and s ~= 2 then
+                table.insert(pair, s)
+                if #pair == 2 then break end
+            end
+        end
+        if #pair == 2 then
+            local pick = (from_slot % 2 == 0) and pair[1] or pair[2]
+            return pick
+        end
+        if #pair == 1 then return pair[1] end
+        for s = 1, 6 do
+            if s ~= from_slot and alive_slots[s] then return s end
+        end
+        return from_slot
     end
     local target = ((from_slot + round) % 6) + 1  -- 6 = canonical participant count (D-02)
     for _ = 1, 6 do  -- 6 = canonical participant count (D-02)
