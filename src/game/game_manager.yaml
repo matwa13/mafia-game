@@ -1,0 +1,27 @@
+version: "1.0"
+namespace: app.game
+
+entries:
+  - name: game_manager
+    kind: process.lua
+    source: file://game_manager.lua
+    modules:
+      - logger
+      - time
+      - sql
+      - uuid
+    imports:
+      pe: app.lib:events
+    method: run
+
+  - name: game_manager_service
+    kind: process.service
+    process: app.game:game_manager
+    host: app.processes:host
+    lifecycle:
+      auto_start: true
+      restart:
+        max_attempts: 3
+        initial_delay: 2s
+        max_delay: 15s
+        backoff_factor: 2.0

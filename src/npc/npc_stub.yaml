@@ -1,0 +1,12 @@
+version: "1.0"
+namespace: app.npc
+
+entries:
+  - name: npc_stub
+    kind: process.lua
+    source: file://npc_stub.lua
+    modules:
+      - logger
+      - events
+      - time
+    method: run

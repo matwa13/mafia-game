@@ -1,0 +1,17 @@
+version: "1.0"
+namespace: app.game
+
+entries:
+  - name: orchestrator
+    kind: process.lua
+    source: file://orchestrator.lua
+    modules:
+      - logger
+      - events
+      - time
+      - sql
+      - uuid
+      - env
+    imports:
+      pe: app.lib:events
+    method: run
