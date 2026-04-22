@@ -250,15 +250,12 @@ local function run(_args)
         log_fail("db", "sql.get: " .. tostring(db_err))
     else
         probe_db(db)
+        db:release()
     end
 
     probe_events_ordering()
     probe_registry_xprocess()
     probe_echo()
-
-    if db ~= nil then
-        db:release()
-    end
 
     logger:info("[probe] all checks complete")
 
