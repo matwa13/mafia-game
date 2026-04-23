@@ -52,7 +52,7 @@ export function RosterChip({ entry, isHuman, isDead }: RosterChipProps) {
           whiteSpace: "nowrap",
         }}
       >
-        {isHuman ? "You" : entry.name}
+        {entry.name}
       </span>
     </div>
   );

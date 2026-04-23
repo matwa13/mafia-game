@@ -125,7 +125,10 @@ local function spawn_npcs(game_id, roles, player_slot, slot_persona, roster_name
                         if s ~= player_slot and slot_persona[s] then
                             partner_name = slot_persona[s].name
                         elseif s == player_slot then
-                            partner_name = "You"
+                            -- Use the player's real name from roster_names
+                            -- (populated at INIT). Fallback to "You" for
+                            -- legacy callers that don't populate it.
+                            partner_name = (roster_names and roster_names[player_slot]) or "You"
                         end
                         break
                     end
@@ -396,7 +399,10 @@ local function build_gsc_roster(alive_map, roles_map, slot_persona_map, roster_n
     for slot = 1, 6 do
         local name
         if slot == player_sl then
-            name = "You"
+            -- Prefer the player's chosen name from roster_names_map (the live
+            -- orchestrator state). Fallback to "You" for legacy callers
+            -- (e.g., test_driver) that do not populate roster_names_map.
+            name = (roster_names_map and roster_names_map[slot]) or "You"
         else
             local sp = slot_persona_map and slot_persona_map[slot]
             if sp then
@@ -1238,6 +1244,14 @@ local function run(args)
     local force_tie = args.force_tie == true
     local driver_pid = args.driver_pid
     local gm_pid = args.gm_pid
+    -- Player-supplied display name. Flows into roster_names[player_slot] so
+    -- NPCs see the real name in their event log (visible_context) and the
+    -- SPA renders it in roster chips and chat bubbles. Defaults to "You" so
+    -- legacy callers (test_driver etc.) still work without plumbing.
+    local player_name = args.player_name
+    if type(player_name) ~= "string" or player_name == "" then
+        player_name = "You"
+    end
 
     if not (game_id and rng_seed and gm_pid) then
         logger:error("[orchestrator] missing required args", { args = tostring(args) })
@@ -1304,8 +1318,8 @@ local function run(args)
         local idx = 0
         for slot = 1, 6 do
             if slot == player_slot then
-                roster_names[slot] = "You"
-                name_to_slot["You"] = slot
+                roster_names[slot] = player_name
+                name_to_slot[player_name] = slot
             else
                 idx = idx + 1
                 slot_persona[slot] = personas[idx]
@@ -1320,8 +1334,8 @@ local function run(args)
         -- Stub mode: synthesize minimal names for audit/logs.
         for slot = 1, 6 do
             if slot == player_slot then
-                roster_names[slot] = "You"
-                name_to_slot["You"] = slot
+                roster_names[slot] = player_name
+                name_to_slot[player_name] = slot
             else
                 roster_names[slot] = "stub-" .. tostring(slot)
                 name_to_slot[roster_names[slot]] = slot

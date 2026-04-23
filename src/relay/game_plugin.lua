@@ -83,11 +83,20 @@ local function run(args)
                 if not gm_pid then
                     forward(conn_pid, "game_error", { code = "NO_GAME_MANAGER" })
                 else
+                    -- Sanitize + clamp the player name (V5 input validation).
+                    -- Empty / missing → default "Player" so the game can still
+                    -- start; the SPA is supposed to require non-empty at the
+                    -- Setup screen, this is just defense-in-depth.
+                    local pname = tostring(data.name or ""):gsub("^%s+", ""):gsub("%s+$", "")
+                    if #pname > 32 then pname = pname:sub(1, 32) end
+                    if pname == "" then pname = "Player" end
+
                     process.send(gm_pid, "game.start", {
                         driver_pid = process.pid(),
                         seed = data.seed,
                         player_slot = 1,      -- MVP: human is always slot 1 (Phase 0 hardcode)
                         force_tie = data.force_tie == true,
+                        player_name = pname,
                     })
                     -- Inline wait for the game.started reply (Phase 2 response contract).
                     local wait_deadline = time.after("5s")

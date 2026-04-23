@@ -54,7 +54,7 @@ export function ChatBubble({
             paddingBottom: 1,
           }}
         >
-          {isHuman ? "You" : name}
+          {name}
           {isInterjection && (
             <span className="ml-1 text-sm" style={{ color: "var(--color-text-muted)" }}>
               ⏵

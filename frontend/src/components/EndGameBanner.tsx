@@ -73,7 +73,7 @@ export function EndGameBanner() {
                     }}
                   />
                   <span className="text-base flex-1">
-                    {isHuman ? "You" : entry.name}
+                    {entry.name}
                   </span>
                   <span
                     className="text-sm font-semibold capitalize"

@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useStore } from "./store";
 import { useGameSocket } from "./ws";
 import { StatusBanner } from "./components/StatusBanner";
@@ -22,7 +22,11 @@ export default function App() {
   const lastElim = useStore((s) => s.game.lastEliminated);
 
   if (phase === null || phase === undefined) {
-    return <SetupScreen onStart={() => send("game_start", { seed: 3 })} />;
+    return (
+      <SetupScreen
+        onStart={(playerName) => send("game_start", { seed: 3, name: playerName })}
+      />
+    );
   }
 
   return (
@@ -45,15 +49,59 @@ export default function App() {
   );
 }
 
-function SetupScreen({ onStart }: { onStart: () => void }) {
+function SetupScreen({ onStart }: { onStart: (name: string) => void }) {
+  const [name, setName] = useState("");
+  const trimmed = name.trim();
+  const canStart = trimmed.length > 0 && trimmed.length <= 32;
+
+  function handleStart() {
+    if (!canStart) return;
+    onStart(trimmed);
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      handleStart();
+    }
+  }
+
   return (
     <div className="min-h-screen flex items-center justify-center">
-      <div className="max-w-[560px] text-center space-y-8">
+      <div className="max-w-[560px] w-full text-center space-y-8 px-4">
         <h1 className="text-2xl font-semibold">MAFIA — MVP</h1>
         <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>
           5 NPCs. One human. One vote.
         </p>
-        <Button variant="primary" onClick={onStart}>Start new game</Button>
+        <div className="flex flex-col items-center gap-3">
+          <label
+            htmlFor="player-name"
+            className="text-sm"
+            style={{ color: "var(--color-text-muted)" }}
+          >
+            Your name (required)
+          </label>
+          <input
+            id="player-name"
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="e.g. Alex"
+            maxLength={32}
+            autoFocus
+            className="w-full max-w-[320px] rounded-md px-3 py-2 text-base outline-none focus-visible:ring-2"
+            style={{
+              background: "var(--color-surface-raised)",
+              color: "var(--color-text)",
+              border: "1px solid var(--color-border)",
+              outlineColor: "var(--color-accent)",
+            }}
+          />
+          <Button variant="primary" onClick={handleStart} disabled={!canStart}>
+            Start new game
+          </Button>
+        </div>
         <div className="text-sm text-left space-y-1" style={{ color: "var(--color-text-muted)" }}>
           <p>• 2 Mafia and 4 Villagers (you are one of 6)</p>
           <p>• Night: Mafia picks a target. Day: town votes.</p>
