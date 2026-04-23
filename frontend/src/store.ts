@@ -135,10 +135,6 @@ export const useStore = create<StoreState>((set, get) => ({
       const round = Number(data.round);
       const fromSlot = Number(data.from_slot);
       const seq = data.seq != null ? Number(data.seq) : undefined;
-      // Streaming keys now include seq (${round}:${fromSlot}:${seq}), so
-      // match the committed message's seq to remove the right entry. If seq
-      // is missing (human interjection), fall back to the legacy compound key.
-      const streamKey = seq != null ? `${round}:${fromSlot}:${seq}` : `${round}:${fromSlot}:x`;
       const roster = get().game.roster;
       const fromName = roster[fromSlot]?.name ?? String(data.from_slot ?? fromSlot);
       const msg: ChatMessage = {
@@ -149,9 +145,19 @@ export const useStore = create<StoreState>((set, get) => ({
         text: String(data.text ?? ""),
         kind: (data.kind as ChatMessage["kind"]) ?? "npc",
       };
+      // Defensive cleanup: delete EVERY streaming entry that matches the
+      // (round, slot) prefix, not just the exact (round, slot, seq) key.
+      // An orphan can persist if the orchestrator's chunk payload omitted
+      // seq for any reason (stale process code, event-bus serialization,
+      // re-emit path), or if a prior turn chat.declined and thus never
+      // published a chat.line. Either would leave a blinking caret on a
+      // "ghost" streaming bubble. Prefix-match cleans both up.
+      const prefix = `${round}:${fromSlot}:`;
       set((s) => {
         const newStreaming = { ...s.chat.streaming };
-        delete newStreaming[streamKey];
+        for (const k of Object.keys(newStreaming)) {
+          if (k.startsWith(prefix)) delete newStreaming[k];
+        }
         return {
           chat: {
             messages: [...s.chat.messages, msg],

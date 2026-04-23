@@ -26,10 +26,10 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="h-screen flex flex-col">
       <StatusBanner />
       {lastElim && <EliminationRibbon victimName={lastElim.name} />}
-      <main className="flex-1 flex">
+      <main className="flex-1 flex min-h-0">
         {(phase === "day" || phase === "night") && (
           <>
             <ChatTranscript />
