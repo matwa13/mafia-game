@@ -324,21 +324,31 @@ end
 -- CANCEL, and abort.turn), then send the full text as a single chat.submit.
 
 local function extract_generate_text(res)
-    -- framework/llm's blocking generate response shape varies — accept a
-    -- plain string, a {content=...}/{text=...} table, or a nested
-    -- {result={...}} table. Return the first plausible string found or "".
+    -- Authoritative Wippy shape (from vendor/wippy/llm/llm.lua normalize_response):
+    --   { result = <string>, tokens, finish_reason, metadata, tool_calls }
+    -- where `result` is the generated text itself as a STRING.
+    -- Fallbacks below cover plain-string returns and tables that may carry
+    -- `content`/`text` at the top level or nested — only used if `result`
+    -- is missing.
     if type(res) == "string" then return res end
     if type(res) ~= "table" then return "" end
+    -- Canonical case: result is a string.
+    local r = nil
+    for k, v in pairs(res) do
+        if k == "result" then r = v end
+    end
+    if type(r) == "string" then return r end
+    -- Defensive fallbacks (in case provider emits a non-canonical shape).
+    if type(r) == "table" then
+        for k2, v2 in pairs(r) do
+            if (k2 == "content" or k2 == "text") and type(v2) == "string" then
+                return v2
+            end
+        end
+    end
     for k, v in pairs(res) do
         if (k == "content" or k == "text") and type(v) == "string" then
             return v
-        end
-        if k == "result" and type(v) == "table" then
-            for k2, v2 in pairs(v) do
-                if (k2 == "content" or k2 == "text") and type(v2) == "string" then
-                    return v2
-                end
-            end
         end
     end
     return ""
