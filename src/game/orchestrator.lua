@@ -628,6 +628,26 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
     local day_deadline = time.after(day_duration_s)
     local day_deadline_fired = false
 
+    -- Buffer for an in-flight player interjection. If the user types during an
+    -- NPC turn, we stash the text here and commit it AFTER the NPC's own
+    -- chat.submit fires — so the NPC's bubble appears first, the user's
+    -- interjection appears below it (matching "NPC started, then you typed").
+    -- Committing immediately would give the user seq=N and the NPC seq=N+1,
+    -- rendering the user's bubble ABOVE the NPC's in the transcript.
+    local pending_player_chat = nil
+
+    local function flush_pending_player_chat()
+        if pending_player_chat then
+            local _, werr = commit_player_chat(game_id, round,
+                pending_player_chat.from_slot, pending_player_chat.text, chat_seq)
+            if werr then
+                logger:warn("[orchestrator] commit_player_chat (flush) failed",
+                    { err = tostring(werr) })
+            end
+            pending_player_chat = nil
+        end
+    end
+
     for _, slot in ipairs(living_npc_slots) do
         if not alive[slot] then
             goto continue_slot
@@ -675,37 +695,29 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                             logger:error("[orchestrator] commit_chat_line failed",
                                 { slot = slot, err = tostring(werr) })
                         end
+                        -- Flush any buffered interjection AFTER the NPC's commit
+                        -- so the user's bubble renders below the NPC's bubble.
+                        flush_pending_player_chat()
                         done_this_msg = true
 
                     elseif tp == "chat.decline" and raw.from_slot == slot and raw.round == round then
                         logger:info("[orchestrator] chat.decline", {
                             slot = slot, msg_index = msg_index, reason = raw.reason,
                         })
+                        -- NPC gave up / errored; flush buffered interjection now.
+                        flush_pending_player_chat()
                         done_this_msg = true
 
                     elseif tp == "player.chat" then
                         local text = tostring(raw.text or "")
                         if text ~= "" then
-                            if is_mandatory then
-                                -- 1st msg in flight: commit interjection immediately; let NPC finish.
-                                local _, werr = commit_player_chat(game_id, round,
-                                    raw.from_slot or player_slot, text, chat_seq)
-                                if werr then
-                                    logger:warn("[orchestrator] commit_player_chat failed",
-                                        { err = tostring(werr) })
-                                end
-                                -- Keep waiting for NPC chat.submit.
-                            else
-                                -- 2nd optional msg: commit interjection first, then abort.
-                                local _, werr = commit_player_chat(game_id, round,
-                                    raw.from_slot or player_slot, text, chat_seq)
-                                if werr then
-                                    logger:warn("[orchestrator] commit_player_chat failed",
-                                        { err = tostring(werr) })
-                                end
-                                process.send(npc_pid, "abort.turn", {})
-                                done_this_msg = true
-                            end
+                            -- Buffer; commit AFTER current NPC turn via flush.
+                            -- Most-recent wins if user types multiple messages
+                            -- during the same NPC turn (last write replaces).
+                            pending_player_chat = {
+                                text = text,
+                                from_slot = raw.from_slot or player_slot,
+                            }
                         end
                         -- Ignore other topics during day turn.
 
@@ -715,6 +727,8 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                     logger:warn("[orchestrator] per-speaker cap hit",
                         { slot = slot, msg_index = msg_index })
                     process.send(npc_pid, "abort.turn", {})
+                    -- Flush so interjection isn't stuck across the cap boundary.
+                    flush_pending_player_chat()
                     done_this_msg = true
 
                 elseif (not day_deadline_fired) and r.channel == day_deadline then
@@ -722,9 +736,11 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                     if msg_index > 1 then
                         -- Mid 2nd-msg: abort and skip.
                         process.send(npc_pid, "abort.turn", {})
+                        flush_pending_player_chat()
                         done_this_msg = true
                     end
-                    -- Mid 1st-msg: let it finish (D-06).
+                    -- Mid 1st-msg: let it finish (D-06). Interjection flushes
+                    -- when the chat.submit/decline/cap path fires.
                 end
             end
 

@@ -51,7 +51,7 @@ export function InterjectionInput() {
 
   return (
     <div
-      className="flex gap-2 p-3 border-t"
+      className="flex flex-col gap-2 p-3 border-t"
       style={{
         borderColor: "var(--color-border)",
         background: "var(--color-surface)",
