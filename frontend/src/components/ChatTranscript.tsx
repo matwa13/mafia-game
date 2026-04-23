@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useStore } from "../store";
 import { ChatBubble } from "./ChatBubble";
 import { SystemMessage } from "./SystemMessage";
@@ -8,6 +8,21 @@ export function ChatTranscript() {
   const streaming = useStore((s) => s.chat.streaming);
   const roster = useStore((s) => s.game.roster);
   const playerSlot = useStore((s) => s.game.playerSlot);
+
+  // Render messages sorted by (round, seq). Orchestrator reserves a seq for
+  // each NPC turn at the moment the turn starts, so a user interjection that
+  // commits during the turn gets a HIGHER seq than the NPC's eventual commit
+  // — even though the user commits first in wall-clock time. Sorting by seq
+  // therefore puts the NPC's bubble above the user's interjection, matching
+  // "NPC started speaking, then user interjected." System messages with no
+  // seq stay in their insertion position (stable sort).
+  const sortedMessages = useMemo(() => {
+    return [...messages].sort((a, b) => {
+      if (a.round !== b.round) return a.round - b.round;
+      if (a.seq != null && b.seq != null) return a.seq - b.seq;
+      return 0;
+    });
+  }, [messages]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stuckToBottom = useRef(true);
@@ -37,7 +52,7 @@ export function ChatTranscript() {
       className="flex-1 overflow-y-auto flex flex-col gap-4 p-4"
       style={{ maxWidth: 720, margin: "0 auto", width: "100%" }}
     >
-      {messages.map((msg, i) => {
+      {sortedMessages.map((msg, i) => {
         const entry = roster[msg.fromSlot];
         const isHuman = msg.fromSlot === playerSlot || msg.kind === "human";
         const isDead = entry ? !entry.alive : false;
