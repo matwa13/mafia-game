@@ -282,13 +282,17 @@ local function unpack_event(evt)
 end
 
 local function event_to_log_entry(kind, data)
-    local scope, text, from_slot
+    local scope, text, from_slot, victim_slot, revealed_role, cause, round_num
     if type(data) == "table" then
         for k, v in pairs(data) do
             if k == "scope" then scope = v end
             if k == "text" then text = v end
             if k == "message" and not text then text = v end
             if k == "from_slot" then from_slot = v end
+            if k == "victim_slot" then victim_slot = v end
+            if k == "revealed_role" then revealed_role = v end
+            if k == "cause" then cause = v end
+            if k == "round" then round_num = v end
         end
     end
     return {
@@ -296,6 +300,10 @@ local function event_to_log_entry(kind, data)
         kind = kind,
         text = text or "",
         from_slot = from_slot,
+        victim_slot = victim_slot,
+        revealed_role = revealed_role,
+        cause = cause,
+        round = round_num,
     }
 end
 
@@ -618,18 +626,21 @@ end
 
 -- Section L: main loop + boot -----------------------------------------------
 
-local function main_loop(state, public_sub, mafia_sub, public_ch, mafia_ch, proc_ev)
+local function main_loop(state, public_sub, mafia_sub, system_sub,
+                         public_ch, mafia_ch, system_ch, proc_ev)
     local inbox = process.inbox()
 
     while true do
         local cases = { inbox:case_receive(), proc_ev:case_receive() }
         if public_ch then table.insert(cases, public_ch:case_receive()) end
         if mafia_ch  then table.insert(cases, mafia_ch:case_receive())  end
+        if system_ch then table.insert(cases, system_ch:case_receive()) end
 
         local r = channel.select(cases)
         if not r.ok then
             if public_sub then public_sub:close() end
             if mafia_sub  then mafia_sub:close()  end
+            if system_sub then system_sub:close() end
             return
         end
 
@@ -709,20 +720,35 @@ local function main_loop(state, public_sub, mafia_sub, public_ch, mafia_ch, proc
             if event and event.kind == process.event.CANCEL then
                 if public_sub then public_sub:close() end
                 if mafia_sub  then mafia_sub:close()  end
+                if system_sub then system_sub:close() end
                 logger:info("[npc] CANCEL; exiting", { npc = state.npc_id })
                 return
             end
 
         elseif r.channel == public_ch then
             -- Accumulate events into log for prompt context (NPC-06).
+            -- Skip chat.chunk — streaming chunks are transient and each
+            -- chunk would otherwise become a log entry, flooding the
+            -- prompt. Only chat.line (the committed bubble) is narrative.
             local kind, data = unpack_event(r.value)
-            if kind then
+            if kind and kind ~= "chat.chunk" then
                 append_event(state, event_to_log_entry(kind, data))
             end
 
         elseif mafia_ch and r.channel == mafia_ch then
             local kind, data = unpack_event(r.value)
             if kind then
+                append_event(state, event_to_log_entry(kind, data))
+            end
+
+        elseif system_ch and r.channel == system_ch then
+            -- System scope carries many orchestration events
+            -- (game_state_changed, chat_locked, npc_turn_skipped). Only
+            -- the genuinely narrative ones belong in the NPC's prompt:
+            -- night.resolved tells them someone was killed at night,
+            -- and vote.tied tells them the vote failed to lynch.
+            local kind, data = unpack_event(r.value)
+            if kind == "night.resolved" or kind == "vote.tied" then
                 append_event(state, event_to_log_entry(kind, data))
             end
 
@@ -777,13 +803,20 @@ local function run(args)
     end
 
     -- 3. Subscribe BEFORE ready-ack.
+    -- scope_allowed permits `system` for both roles (villager + mafia),
+    -- so we subscribe to mafia.system for night.resolved / vote.tied
+    -- narrative events. The main_loop filters the specific kinds it cares
+    -- about (see system_ch handler) to avoid polluting the prompt with
+    -- game_state_changed / chat_locked chatter.
     local public_sub = events.subscribe("mafia.public", "*")
+    local system_sub = events.subscribe("mafia.system", "*")
     local mafia_sub = nil
     if role == "mafia" then
         mafia_sub = events.subscribe("mafia.mafia", "*")
     end
     local public_ch = public_sub and public_sub:channel() or nil
     local mafia_ch  = mafia_sub  and mafia_sub:channel()  or nil
+    local system_ch = system_sub and system_sub:channel() or nil
     local proc_ev = process.events()
 
     -- 4. Rehydrate suspicion from last snapshot (NPC-08 restart survival).
@@ -814,7 +847,8 @@ local function run(args)
     }
 
     -- 7. Main loop.
-    main_loop(state, public_sub, mafia_sub, public_ch, mafia_ch, proc_ev)
+    main_loop(state, public_sub, mafia_sub, system_sub,
+              public_ch, mafia_ch, system_ch, proc_ev)
 end
 
 return { run = run }

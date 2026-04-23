@@ -35,10 +35,19 @@ local function visible_context(npc_id, state, mode)
     table.insert(lines, "")
 
     -- 2. EVENT LOG WITH SCOPE-ASSERT PANIC (D-11).
-    -- Chat lines render as "<speaker>: <text>" so the NPC can distinguish
-    -- who said what — including the human player's interjections. Other
-    -- events (night.resolved, player.eliminated, chat_locked, etc.) keep
-    -- the legacy "<kind>: <text>" render since they aren't person-bound.
+    -- Render kind-aware narrative lines so the NPC's prompt reads like a
+    -- game transcript:
+    --   - chat.line        → "<speaker>: <text>"
+    --   - night.resolved   → "[NIGHT round N] <victim> was killed — they were <role>."
+    --   - player.eliminated → "[DAY round N] <victim> was voted out — they were <role>."
+    --   - vote.tied        → "[DAY round N] Vote was tied — no elimination."
+    --   - other kinds      → fall back to legacy "<kind>: <text>".
+    local function name_of(slot)
+        if not slot then return "someone" end
+        if roster_names and roster_names[slot] then return roster_names[slot] end
+        return "slot-" .. tostring(slot)
+    end
+
     table.insert(lines, "===EVENTS===")
     for _, event in ipairs(state.event_log or {}) do
         assert(pe.scope_allowed(state.role, event.scope),
@@ -47,10 +56,34 @@ local function visible_context(npc_id, state, mode)
                 tostring(state.role),
                 tostring(event.scope),
                 tostring(event.kind)))
-        if event.kind == "chat.line" and event.from_slot and roster_names then
-            local speaker = roster_names[event.from_slot]
-                or ("slot-" .. tostring(event.from_slot))
-            table.insert(lines, speaker .. ": " .. (event.text or ""))
+
+        if event.kind == "chat.line" and event.from_slot then
+            table.insert(lines, name_of(event.from_slot) .. ": " .. (event.text or ""))
+
+        elseif event.kind == "night.resolved" and event.victim_slot then
+            local round_str = event.round and ("round " .. tostring(event.round)) or "night"
+            local role_str  = event.revealed_role
+                and (" — they were " .. tostring(event.revealed_role))
+                or ""
+            table.insert(lines,
+                "[NIGHT " .. round_str .. "] " .. name_of(event.victim_slot)
+                .. " was killed" .. role_str .. ".")
+
+        elseif event.kind == "player.eliminated" and event.victim_slot then
+            local round_str = event.round and ("round " .. tostring(event.round)) or "day"
+            local role_str  = event.revealed_role
+                and (" — they were " .. tostring(event.revealed_role))
+                or ""
+            local cause_str = event.cause == "night" and "killed at night" or "voted out"
+            table.insert(lines,
+                "[DAY " .. round_str .. "] " .. name_of(event.victim_slot)
+                .. " was " .. cause_str .. role_str .. ".")
+
+        elseif event.kind == "vote.tied" then
+            local round_str = event.round and ("round " .. tostring(event.round)) or "day"
+            table.insert(lines,
+                "[DAY " .. round_str .. "] Vote was tied — no elimination.")
+
         else
             table.insert(lines, event.kind .. ": " .. (event.text or ""))
         end
