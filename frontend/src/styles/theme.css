@@ -1,0 +1,102 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+
+@theme {
+  /* Typography — UI-SPEC §4 */
+  --font-sans: "Inter Variable", "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", monospace;
+
+  /* Color — UI-SPEC §5 (neutral foundation) */
+  --color-bg: oklch(0.15 0.012 265);
+  --color-surface: oklch(0.22 0.016 265);
+  --color-surface-raised: oklch(0.27 0.020 265);
+  --color-border: oklch(0.35 0.020 265);
+  --color-text: oklch(0.92 0.008 265);
+  --color-text-muted: oklch(0.66 0.012 265);
+
+  /* 10% accent — reserved (human player, primary CTA, focus ring) */
+  --color-accent: #c9a24a;
+
+  /* Semantic feedback */
+  --color-danger: #c0443a;
+  --color-success: #4a9d6e;
+
+  /* Role tokens */
+  --color-role-mafia: #a84848;
+  --color-role-villager: #4a7ba8;
+  --color-role-human: #c9a24a;
+  --color-role-dead: #4a4d5a;
+
+  /* Per-NPC persona colors (UI-SPEC §5 — 15 archetypes) */
+  --persona-hedger: #d48b9a;
+  --persona-blunt: #7a8898;
+  --persona-rambler: #c88858;
+  --persona-formalist: #6c87b8;
+  --persona-folksy: #c88858;
+  --persona-analyst: #8da05a;
+  --persona-contrarian: #c87058;
+  --persona-provocateur: #b868a6;
+  --persona-peacemaker: #a898c0;
+  --persona-pragmatist: #7a8898;
+  --persona-emotive: #d48b9a;
+  --persona-observer: #9878a8;
+  --persona-storyteller: #b89868;
+  --persona-sardonic: #5aa0a0;
+  --persona-zealot: #8a7acb;
+
+  /* Radius */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* Elevation */
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-2: 0 8px 24px rgb(0 0 0 / 0.5);
+}
+
+html, body, #root {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  height: 100%;
+  margin: 0;
+}
+
+/* Keyframe animations */
+@keyframes bubbleEnter {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+@keyframes flipReveal {
+  from { opacity: 0; transform: rotateY(90deg); }
+  to   { opacity: 1; transform: rotateY(0deg); }
+}
+
+@keyframes slideDownRibbon {
+  from { opacity: 0; transform: translateY(-32px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes lastWordsEnter {
+  from { opacity: 0; transform: scale(0.98); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes endGameEnter {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
