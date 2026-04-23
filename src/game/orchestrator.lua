@@ -679,9 +679,14 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
 
                     if tp == "chat.stream.chunk" and raw.from_slot == slot and raw.round == round then
                         -- Pattern 3 re-emit: publish as public chat.chunk; do NOT persist.
+                        -- Include reserved_seq so the SPA can position the
+                        -- streaming bubble at the NPC's eventual seq slot,
+                        -- preventing the "bubble jumps into place" visual
+                        -- when the NPC finally commits.
                         pe.publish_event("public", "chat.chunk", "/" .. game_id, {
                             round = raw.round, from_slot = raw.from_slot,
                             chunk_seq = raw.chunk_seq, text = raw.text,
+                            seq = reserved_seq,
                         })
 
                     elseif tp == "chat.submit" and raw.from_slot == slot and raw.round == round then

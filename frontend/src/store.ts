@@ -5,6 +5,10 @@ interface StreamingEntry {
   fromSlot: number;
   round: number;
   text: string;
+  // Reserved seq from the orchestrator. Lets ChatTranscript position the
+  // streaming bubble at its eventual committed slot while it's still
+  // streaming (no "jumps into place" when the NPC commits).
+  seq?: number;
 }
 
 interface ChatSlice {
@@ -101,12 +105,14 @@ export const useStore = create<StoreState>((set, get) => ({
       const fromSlot = Number(data.from_slot);
       const chunkSeq = Number(data.chunk_seq);
       const text = String(data.text ?? "");
-      const key = `${round}:${fromSlot}`;
+      const seq = data.seq != null ? Number(data.seq) : undefined;
+      const key = `${round}:${fromSlot}:${seq ?? "x"}`;
       // chunk_seq resets to 1 at the start of each turn. If we see chunk_seq=1
-      // while an existing streaming buffer lingers for this (round, slot),
-      // it means turn 2 has started before turn 1's chat.line cleared the
-      // buffer — treat as a new turn and reset. Without this, turn 2's chunks
-      // would visually concatenate into the turn-1 streaming bubble.
+      // while an existing streaming buffer lingers for this (round, slot, seq),
+      // treat as a new turn and reset. The seq is included in the key so
+      // consecutive turns from the same NPC in the same round use different
+      // keys (turn 1 seq=5, turn 2 seq=6) and never accumulate into each
+      // other's buffer.
       const shouldReset = chunkSeq === 1;
       set((s) => ({
         chat: {
@@ -116,6 +122,7 @@ export const useStore = create<StoreState>((set, get) => ({
             [key]: {
               fromSlot,
               round,
+              seq,
               text: shouldReset ? text : (s.chat.streaming[key]?.text ?? "") + text,
             },
           },
@@ -127,11 +134,15 @@ export const useStore = create<StoreState>((set, get) => ({
     if (topic === "game_chat_line") {
       const round = Number(data.round);
       const fromSlot = Number(data.from_slot);
-      const key = `${round}:${fromSlot}`;
+      const seq = data.seq != null ? Number(data.seq) : undefined;
+      // Streaming keys now include seq (${round}:${fromSlot}:${seq}), so
+      // match the committed message's seq to remove the right entry. If seq
+      // is missing (human interjection), fall back to the legacy compound key.
+      const streamKey = seq != null ? `${round}:${fromSlot}:${seq}` : `${round}:${fromSlot}:x`;
       const roster = get().game.roster;
       const fromName = roster[fromSlot]?.name ?? String(data.from_slot ?? fromSlot);
       const msg: ChatMessage = {
-        seq: data.seq != null ? Number(data.seq) : undefined,
+        seq,
         round,
         fromSlot,
         fromName,
@@ -140,7 +151,7 @@ export const useStore = create<StoreState>((set, get) => ({
       };
       set((s) => {
         const newStreaming = { ...s.chat.streaming };
-        delete newStreaming[key];
+        delete newStreaming[streamKey];
         return {
           chat: {
             messages: [...s.chat.messages, msg],
