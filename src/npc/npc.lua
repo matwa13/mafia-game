@@ -199,11 +199,15 @@ local function build_chat_prompt(state, is_mandatory)
         roster = state.roster or {},
         slot = state.slot,
     }, "chat")
+    -- Phase 3.1: both turns are mandatory. The 2nd turn is a short reactive
+    -- follow-up, not an optional skip. This eliminates the DECLINE token
+    -- entirely — the LLM has no reason to emit it because it's not in the
+    -- prompt anymore.
     local directive
     if is_mandatory then
-        directive = "\n\n===SPEAK NOW===\nIt's your turn. In 1-2 short sentences (max ~40 words), share your read on the day so far. Address other players by name when you accuse, defend, or question. Do NOT write paragraphs."
+        directive = "\n\n===SPEAK NOW — OPENING===\nIt's your turn to open. In 1-2 short sentences (max ~40 words), share your read on the day so far. Address other players by name when you accuse, defend, or question. Do NOT write paragraphs."
     else
-        directive = "\n\n===SPEAK NOW (OPTIONAL)===\nYou may add ONE short follow-up sentence (max ~25 words). If you have nothing new to say, return exactly 'DECLINE'."
+        directive = "\n\n===SPEAK NOW — FOLLOW-UP===\nAdd ONE short follow-up sentence (max ~25 words) that reacts to what was just said. Sharpen an accusation, defend yourself, or call out someone's silence. Always say something concrete — no filler."
     end
     p:add_user(tail .. directive)
     return p
@@ -409,16 +413,16 @@ local function run_chat_turn(state, round, is_mandatory)
             elseif ctype == "done" then
                 process.unlisten(chunk_ch)
                 local full = table.concat(buf)
-                if (not is_mandatory) and full:match("^%s*DECLINE%s*$") then
-                    process.send(state.parent_pid, "chat.decline", {
-                        from_slot = state.slot, round = round, reason = "declined",
-                    })
-                else
-                    process.send(state.parent_pid, "chat.submit", {
-                        from_slot = state.slot, round = round,
-                        text = full, kind = "npc",
-                    })
-                end
+                -- Defensive: strip a trailing "DECLINE" / "DECLINED" token (with
+                -- optional surrounding whitespace/punctuation) in case the model
+                -- echoes it from its training or cached context. Both turns are
+                -- mandatory now, so DECLINE is never instructed — but models can
+                -- still emit it occasionally.
+                full = full:gsub("[%s%p]*[Dd][Ee][Cc][Ll][Ii][Nn][Ee][Dd]?[%s%p]*$", "")
+                process.send(state.parent_pid, "chat.submit", {
+                    from_slot = state.slot, round = round,
+                    text = full, kind = "npc",
+                })
                 return
             elseif ctype == "error" then
                 process.unlisten(chunk_ch)
