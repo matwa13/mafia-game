@@ -422,10 +422,14 @@ local function emit_game_state_changed(game_id, alive_map, roles_map,
 end
 
 -- Variant that carries last_eliminated payload (lynch/night-kill reveal).
+-- chat_locked_flag: pass true during the vote-reveal animation window;
+-- pass false when using this at the night-kill-to-day transition so the
+-- SPA input is not disabled at the start of a fresh day.
 local function emit_game_state_changed_elim(game_id, alive_map, roles_map,
                                              slot_persona_map, roster_names_map,
                                              player_sl, phase, round,
-                                             elim_slot, elim_name, elim_role, elim_cause)
+                                             elim_slot, elim_name, elim_role, elim_cause,
+                                             chat_locked_flag)
     local roster = build_gsc_roster(alive_map, roles_map, slot_persona_map,
                                      roster_names_map, player_sl)
     pe.publish_event("system", "game_state_changed", "/" .. game_id, {
@@ -435,7 +439,7 @@ local function emit_game_state_changed_elim(game_id, alive_map, roles_map,
         roster = roster,
         player_slot = player_sl,
         game_id = game_id,
-        chat_locked = true,
+        chat_locked = chat_locked_flag == nil and true or chat_locked_flag,
         last_eliminated = {
             slot = elim_slot, name = elim_name, role = elim_role, cause = elim_cause,
         },
@@ -1353,7 +1357,8 @@ local function run(args)
             local vrole = state.roles and state.roles[night_victim_slot] or nil
             emit_game_state_changed_elim(game_id, state.alive, state.roles, state.slot_persona,
                 state.roster_names, player_slot, "day", state.round,
-                night_victim_slot, vname, vrole, "night")
+                night_victim_slot, vname, vrole, "night",
+                false) -- chat_locked=false: day chat opens now
         else
             emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
                 state.roster_names, player_slot, "day", state.round, false)
