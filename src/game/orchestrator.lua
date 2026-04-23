@@ -581,8 +581,12 @@ end
 local function run_day_discussion_streaming(game_id, round, alive, player_slot, npc_pids,
                                             dev_mode_flag, chat_seq, inbox,
                                             rng_seed, roles, slot_persona, roster_names)
-    local day_duration_s = dev_mode_flag and "15s" or "60s"
-    local per_speaker_s  = dev_mode_flag and "8s"  or "25s"
+    -- Day window must hold ~4-5 speakers at ~6-10s each (LLM streaming +
+    -- commit). 15s was too tight post-max_tokens=80 — pairs with npc.lua
+    -- build_chat_prompt "1-2 sentences" directive. Per-speaker cap widened
+    -- slightly so a slightly slow LLM response still completes cleanly.
+    local day_duration_s = dev_mode_flag and "60s" or "120s"
+    local per_speaker_s  = dev_mode_flag and "12s" or "25s"
 
     -- Randomized-start round-robin over alive NPC slots (exclude player).
     math.randomseed(math.floor(tonumber(rng_seed) or 0) + round * 1000)
@@ -981,7 +985,12 @@ local function run_vote_round_llm(game_id, round, alive, roles, player_slot, npc
     for slot = 1, 6 do if alive[slot] then needed = needed + 1 end end
 
     local votes_by_slot = {}  -- [slot] = { vote_for_slot, reasoning }
-    local vote_cap = time.after(dev_mode() and "10s" or "20s")
+    -- vote_cap must exceed npc.lua VOTE_CAP_S (15s structured_output deadline)
+    -- or NPC vote.casts arrive AFTER the orchestrator has already tallied.
+    -- Also must give the human player realistic time to read reasoning + pick.
+    -- Early-exit via `count_map(votes_by_slot) >= needed` still fires as soon
+    -- as the last vote (usually the player's) arrives.
+    local vote_cap = time.after(dev_mode() and "120s" or "180s")
     while true do
         local r = channel.select({ inbox:case_receive(), vote_cap:case_receive() })
         if not r.ok or r.channel == vote_cap then break end
