@@ -376,6 +376,12 @@ end
 -- alive_map is state.alive — the SOLE liveness field. Role is revealed only
 -- when alive_map[slot] == false (slot is dead). No parallel eliminated-slot table.
 local function build_gsc_roster(alive_map, roles_map, slot_persona_map, roster_names_map, player_sl)
+    -- Use STRING keys for the outer map so the Wippy JSON serializer emits a
+    -- JSON object, not a JSON array. A 1-indexed dense integer-keyed Lua table
+    -- gets serialized as `[val1, val2, ...]` (0-indexed on the wire); the SPA's
+    -- Object.entries then shifts all slot IDs down by 1, producing the "two
+    -- 'You' chips" bug. String keys ("1", "2", ...) round-trip cleanly through
+    -- parseInt on the SPA side.
     local roster = {}
     for slot = 1, 6 do
         local name
@@ -398,7 +404,7 @@ local function build_gsc_roster(alive_map, roles_map, slot_persona_map, roster_n
         if not is_alive then
             revealed_role = roles_map[slot]
         end
-        roster[slot] = { name = name, alive = is_alive, role = revealed_role }
+        roster[tostring(slot)] = { name = name, alive = is_alive, role = revealed_role }
     end
     return roster
 end
