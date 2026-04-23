@@ -644,17 +644,21 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
     -- message lands in the orchestrator's inbox during day discussion.
     local advance_requested = false
 
-    for _, slot in ipairs(living_npc_slots) do
-        if not alive[slot] then
-            goto continue_slot
-        end
-        local npc_pid = npc_pids[slot]
-        if not npc_pid then
-            goto continue_slot
-        end
+    -- Two-pass round-robin: all living NPCs do their opening first
+    -- (msg_index=1), then all living NPCs do their follow-up (msg_index=2).
+    -- This keeps every speaker in rotation instead of letting one NPC
+    -- monopolize both turns before the next speaker begins.
+    for msg_index = 1, 2 do
+        local is_mandatory = (msg_index == 1)
 
-        for msg_index = 1, 2 do
-            local is_mandatory = (msg_index == 1)
+        for _, slot in ipairs(living_npc_slots) do
+            if not alive[slot] then
+                goto continue_slot
+            end
+            local npc_pid = npc_pids[slot]
+            if not npc_pid then
+                goto continue_slot
+            end
 
             -- RESERVE a seq for this NPC turn BEFORE sending day.turn. Any
             -- player.chat that lands during the turn will commit with a
@@ -733,7 +737,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                         -- User clicked "End discussion →". Abort the in-flight
                         -- NPC turn and flag both loops to exit. We exit this
                         -- inner while via done_this_msg = true; the outer
-                        -- for-loop exits via the advance_requested check.
+                        -- loops exit via the advance_requested checks.
                         logger:info("[orchestrator] player.advance_phase received",
                             { slot = slot, msg_index = msg_index })
                         advance_requested = true
@@ -752,10 +756,10 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
             end
 
             if advance_requested then break end
+            ::continue_slot::
         end
 
         if advance_requested then break end
-        ::continue_slot::
     end
 
     -- Drain remaining chunks ~500ms so late submit/chunk don't leak into vote phase.
