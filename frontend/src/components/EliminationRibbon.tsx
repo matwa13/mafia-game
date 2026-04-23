@@ -9,7 +9,7 @@ export function EliminationRibbon({ victimName }: EliminationRibbonProps) {
 
   useEffect(() => {
     setVisible(true);
-    const timer = setTimeout(() => setVisible(false), 4000);
+    const timer = setTimeout(() => setVisible(false), 6500);
     return () => clearTimeout(timer);
   }, [victimName]);
 
