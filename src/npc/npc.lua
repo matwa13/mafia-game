@@ -201,9 +201,9 @@ local function build_chat_prompt(state, is_mandatory)
     }, "chat")
     local directive
     if is_mandatory then
-        directive = "\n\n===SPEAK NOW===\nIt's your turn. Share your read on the day so far. Address other players by name when you accuse, defend, or question."
+        directive = "\n\n===SPEAK NOW===\nIt's your turn. In 1-2 short sentences (max ~40 words), share your read on the day so far. Address other players by name when you accuse, defend, or question. Do NOT write paragraphs."
     else
-        directive = "\n\n===SPEAK NOW (OPTIONAL)===\nYou may add a follow-up. Keep it short. If you have nothing new to say, return exactly 'DECLINE'."
+        directive = "\n\n===SPEAK NOW (OPTIONAL)===\nYou may add ONE short follow-up sentence (max ~25 words). If you have nothing new to say, return exactly 'DECLINE'."
     end
     p:add_user(tail .. directive)
     return p
@@ -311,8 +311,12 @@ local function run_chat_turn(state, round, is_mandatory)
     local proc_ev = process.events()
 
     local p = build_chat_prompt(state, is_mandatory)
+    -- Hard ceiling on streamed output: ~60 tokens fits 1-2 short sentences and
+    -- prevents one NPC from monopolizing the day window. Pairs with the
+    -- "1-2 sentences" directive in build_chat_prompt.
     local _, gen_err = llm.generate(p, {
         model = MODEL,
+        max_tokens = 80,
         stream = { reply_to = process.pid(), topic = CHUNK_TOPIC },
     })
     if gen_err then
