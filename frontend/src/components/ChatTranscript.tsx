@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useLayoutEffect, useMemo, useRef } from "react";
 import { useStore } from "../store";
 import { ChatBubble } from "./ChatBubble";
 import { SystemMessage } from "./SystemMessage";
@@ -21,11 +21,23 @@ export function ChatTranscript() {
   //
   // System messages with no seq stay in their insertion position via the
   // stable sort fallback.
+  //
+  // DEFENSIVE orphan-caret guard: if a committed message exists with the
+  // same (round, slot, seq) as a streaming entry, the streaming entry is
+  // skipped at render time even if it failed to be deleted from state.
+  // This is belt-and-suspenders on top of the store's chat.line cleanup.
   type RenderItem =
     | { kind: "committed"; round: number; seq?: number; msg: (typeof messages)[number]; id: string }
     | { kind: "streaming"; round: number; seq?: number; streamKey: string; entry: (typeof streaming)[string] };
 
   const renderItems = useMemo<RenderItem[]>(() => {
+    const committedKeys = new Set<string>();
+    const committedSlotRounds = new Set<string>();
+    messages.forEach((m) => {
+      if (m.seq != null) committedKeys.add(`${m.round}:${m.fromSlot}:${m.seq}`);
+      if (m.kind === "npc") committedSlotRounds.add(`${m.round}:${m.fromSlot}`);
+    });
+
     const items: RenderItem[] = [];
     messages.forEach((msg, i) => {
       items.push({
@@ -37,6 +49,17 @@ export function ChatTranscript() {
       });
     });
     Object.entries(streaming).forEach(([streamKey, entry]) => {
+      // Skip if a committed message already exists for this turn. Two
+      // checks: exact (round, slot, seq) match (when seq present), or
+      // (round, slot) match for any committed NPC message (covers the
+      // case where chat.chunk events were missing seq so the streaming
+      // entry lives at `R:S:x` and would otherwise never be matched).
+      if (entry.seq != null) {
+        const exactKey = `${entry.round}:${entry.fromSlot}:${entry.seq}`;
+        if (committedKeys.has(exactKey)) return;
+      }
+      const slotRoundKey = `${entry.round}:${entry.fromSlot}`;
+      if (committedSlotRounds.has(slotRoundKey)) return;
       items.push({
         kind: "streaming",
         round: entry.round,
@@ -54,13 +77,18 @@ export function ChatTranscript() {
   }, [messages, streaming]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const bottomSentinelRef = useRef<HTMLDivElement>(null);
   const stuckToBottom = useRef(true);
 
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || !stuckToBottom.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [messages, streaming]);
+  // useLayoutEffect runs after DOM mutations but BEFORE paint — the
+  // right hook for scroll adjustments so the viewport catches up to
+  // newly-added content without a visible lag or jitter. Scrolling via
+  // a bottom sentinel (scrollIntoView) is more reliable than
+  // scrollTop=scrollHeight inside a flex container.
+  useLayoutEffect(() => {
+    if (!stuckToBottom.current) return;
+    bottomSentinelRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+  }, [renderItems.length, renderItems]);
 
   function onScroll() {
     const el = scrollRef.current;
@@ -76,7 +104,7 @@ export function ChatTranscript() {
       role="log"
       aria-live="polite"
       aria-atomic="false"
-      className="flex-1 overflow-y-auto flex flex-col gap-4 p-4"
+      className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-4 p-4"
       style={{ maxWidth: 720, margin: "0 auto", width: "100%" }}
     >
       {renderItems.map((item) => {
@@ -124,6 +152,8 @@ export function ChatTranscript() {
           />
         );
       })}
+      {/* Bottom sentinel — scrollIntoView target for auto-scroll. */}
+      <div ref={bottomSentinelRef} aria-hidden="true" />
     </div>
   );
 }
