@@ -197,6 +197,7 @@ local function build_chat_prompt(state, is_mandatory)
         role = state.role,
         event_log = state.event_log or {},
         roster = state.roster or {},
+        roster_names = state.roster_names,
         slot = state.slot,
     }, "chat")
     -- Phase 3.1: both turns are mandatory. The 2nd turn is a short reactive
@@ -281,18 +282,20 @@ local function unpack_event(evt)
 end
 
 local function event_to_log_entry(kind, data)
-    local scope, text
+    local scope, text, from_slot
     if type(data) == "table" then
         for k, v in pairs(data) do
             if k == "scope" then scope = v end
             if k == "text" then text = v end
             if k == "message" and not text then text = v end
+            if k == "from_slot" then from_slot = v end
         end
     end
     return {
         scope = scope,
         kind = kind,
         text = text or "",
+        from_slot = from_slot,
     }
 end
 
@@ -448,6 +451,7 @@ local function run_last_words(state, round)
         role = state.role,
         event_log = state.event_log or {},
         roster = state.roster or {},
+        roster_names = state.roster_names,
         slot = state.slot,
     }, "chat")
     local directive

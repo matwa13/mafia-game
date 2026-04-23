@@ -10,18 +10,35 @@ local function visible_context(npc_id, state, mode)
     local render_mode = (mode == "vote") and "vote" or "chat"
     local lines = {}
 
-    -- 1. ROSTER BLOCK (NPC-06 — NPCs need names to address each other)
+    -- 1. ROSTER BLOCK (NPC-06 — NPCs need names to address each other).
+    -- Prefer state.roster_names (the live per-game map from the orchestrator,
+    -- {[slot]=name}) because state.roster is currently always empty (WR-04).
+    -- Fallback to state.roster only for legacy callers that pre-populate it.
     table.insert(lines, "===ROSTER===")
-    for _, entry in ipairs(state.roster or {}) do
-        if entry.alive then
-            table.insert(lines, "- " .. entry.name .. " (alive)")
-        else
-            table.insert(lines, "- " .. entry.name .. " (eliminated)")
+    local roster_names = state.roster_names
+    if roster_names and next(roster_names) ~= nil then
+        for slot = 1, 6 do
+            local name = roster_names[slot]
+            if name and name ~= "" then
+                table.insert(lines, "- " .. name)
+            end
+        end
+    else
+        for _, entry in ipairs(state.roster or {}) do
+            if entry.alive then
+                table.insert(lines, "- " .. entry.name .. " (alive)")
+            else
+                table.insert(lines, "- " .. entry.name .. " (eliminated)")
+            end
         end
     end
     table.insert(lines, "")
 
-    -- 2. EVENT LOG WITH SCOPE-ASSERT PANIC (VERBATIM FROM PHASE 1 — D-11)
+    -- 2. EVENT LOG WITH SCOPE-ASSERT PANIC (D-11).
+    -- Chat lines render as "<speaker>: <text>" so the NPC can distinguish
+    -- who said what — including the human player's interjections. Other
+    -- events (night.resolved, player.eliminated, chat_locked, etc.) keep
+    -- the legacy "<kind>: <text>" render since they aren't person-bound.
     table.insert(lines, "===EVENTS===")
     for _, event in ipairs(state.event_log or {}) do
         assert(pe.scope_allowed(state.role, event.scope),
@@ -30,7 +47,13 @@ local function visible_context(npc_id, state, mode)
                 tostring(state.role),
                 tostring(event.scope),
                 tostring(event.kind)))
-        table.insert(lines, event.kind .. ": " .. (event.text or ""))
+        if event.kind == "chat.line" and event.from_slot and roster_names then
+            local speaker = roster_names[event.from_slot]
+                or ("slot-" .. tostring(event.from_slot))
+            table.insert(lines, speaker .. ": " .. (event.text or ""))
+        else
+            table.insert(lines, event.kind .. ": " .. (event.text or ""))
+        end
     end
 
     -- 3. SUSPICION (render_mode == "vote" ONLY — D-16: suspicion is vote-only)
