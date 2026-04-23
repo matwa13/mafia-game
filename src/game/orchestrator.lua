@@ -673,6 +673,13 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
             chat_seq[round] = (chat_seq[round] or 0) + 1
             local reserved_seq = chat_seq[round]
 
+            -- Tell the SPA to show a "{name} is typing..." bubble at this
+            -- reserved seq slot. The chat.line commit (or typing.ended on
+            -- a decline/abort) will clear it.
+            pe.publish_event("public", "typing.started", "/" .. game_id, {
+                round = round, from_slot = slot, seq = reserved_seq,
+            })
+
             process.send(npc_pid, "day.turn", {
                 round = round,
                 msg_index = msg_index,
@@ -681,6 +688,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
 
             local per_speaker_ch = time.after(per_speaker_s)
             local done_this_msg = false
+            local turn_committed = false
             while not done_this_msg do
                 local r = channel.select({
                     inbox:case_receive(),
@@ -692,19 +700,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                     local tp  = msg and msg:topic() or ""
                     local raw = (msg and msg:payload() and msg:payload():data()) or {}
 
-                    if tp == "chat.stream.chunk" and raw.from_slot == slot and raw.round == round then
-                        -- Pattern 3 re-emit: publish as public chat.chunk; do NOT persist.
-                        -- Include reserved_seq so the SPA can position the
-                        -- streaming bubble at the NPC's eventual seq slot,
-                        -- preventing the "bubble jumps into place" visual
-                        -- when the NPC finally commits.
-                        pe.publish_event("public", "chat.chunk", "/" .. game_id, {
-                            round = raw.round, from_slot = raw.from_slot,
-                            chunk_seq = raw.chunk_seq, text = raw.text,
-                            seq = reserved_seq,
-                        })
-
-                    elseif tp == "chat.submit" and raw.from_slot == slot and raw.round == round then
+                    if tp == "chat.submit" and raw.from_slot == slot and raw.round == round then
                         local kind = raw.kind or "npc"
                         -- Use the reserved seq so this NPC lands at its
                         -- pre-allocated slot regardless of intervening user
@@ -715,6 +711,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                             logger:error("[orchestrator] commit_chat_line failed",
                                 { slot = slot, err = tostring(werr) })
                         end
+                        turn_committed = true
                         done_this_msg = true
 
                     elseif tp == "chat.decline" and raw.from_slot == slot and raw.round == round then
@@ -759,6 +756,15 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                     process.send(npc_pid, "abort.turn", {})
                     done_this_msg = true
                 end
+            end
+
+            -- If the turn ended WITHOUT a commit (decline / per-speaker cap /
+            -- user advance), tell the SPA to clear the typing bubble. On the
+            -- commit path, chat.line already implicitly clears it on the SPA.
+            if not turn_committed then
+                pe.publish_event("public", "typing.ended", "/" .. game_id, {
+                    round = round, from_slot = slot, seq = reserved_seq,
+                })
             end
 
             if advance_requested then break end

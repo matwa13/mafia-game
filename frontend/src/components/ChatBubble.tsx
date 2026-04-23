@@ -10,7 +10,7 @@ interface Speaker {
 interface ChatBubbleProps {
   speaker: Speaker;
   content: string;
-  isStreaming?: boolean;
+  isTyping?: boolean;
   isInterjection?: boolean;
   isLastWords?: boolean;
   timestamp?: number;
@@ -19,7 +19,7 @@ interface ChatBubbleProps {
 export function ChatBubble({
   speaker,
   content,
-  isStreaming,
+  isTyping,
   isInterjection,
   isLastWords,
 }: ChatBubbleProps) {
@@ -74,23 +74,28 @@ export function ChatBubble({
       )}
 
       {/* Content */}
-      <p
-        className={clsx(
-          "leading-relaxed",
-          isLastWords ? "text-2xl font-semibold tracking-tight" : "text-base"
-        )}
-        style={{ color: "var(--color-text)" }}
-      >
-        {content}
-        {isStreaming && (
-          <span
-            className="animate-[blink_1s_step-end_infinite]"
-            style={{ color: "var(--color-text-muted)" }}
-          >
-            ▊
-          </span>
-        )}
-      </p>
+      {isTyping ? (
+        <p
+          className="leading-relaxed text-base italic"
+          style={{ color: "var(--color-text-muted)" }}
+          aria-label={`${name} is typing`}
+        >
+          is typing
+          <span className="animate-[blink_1.2s_step-end_infinite]">.</span>
+          <span className="animate-[blink_1.2s_step-end_infinite_0.2s]">.</span>
+          <span className="animate-[blink_1.2s_step-end_infinite_0.4s]">.</span>
+        </p>
+      ) : (
+        <p
+          className={clsx(
+            "leading-relaxed",
+            isLastWords ? "text-2xl font-semibold tracking-tight" : "text-base"
+          )}
+          style={{ color: "var(--color-text)" }}
+        >
+          {content}
+        </p>
+      )}
     </div>
   );
 }

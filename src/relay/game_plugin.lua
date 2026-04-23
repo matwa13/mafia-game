@@ -197,7 +197,6 @@ local function run(args)
                 -- kind -> client_topic mapping
                 local kind = tostring(evt.kind or "")
                 local client_topic_map = {
-                    ["chat.chunk"]          = "game_chat_chunk",
                     ["chat.line"]           = "game_chat_line",
                     ["chat_locked"]         = "game_chat_locked",
                     ["player.eliminated"]   = "game_eliminated",
@@ -207,6 +206,8 @@ local function run(args)
                     ["game.ended"]          = "game_game_ended",
                     ["game_state_changed"]  = "game_state_changed",
                     ["npc_turn_skipped"]    = "game_npc_skipped",  -- diagnostic for UI toast
+                    ["typing.started"]      = "game_typing_started",
+                    ["typing.ended"]        = "game_typing_ended",
                 }
                 local ct = client_topic_map[kind]
                 if ct then

@@ -5,30 +5,27 @@ import { SystemMessage } from "./SystemMessage";
 
 export function ChatTranscript() {
   const messages = useStore((s) => s.chat.messages);
-  const streaming = useStore((s) => s.chat.streaming);
+  const typing = useStore((s) => s.chat.typing);
   const roster = useStore((s) => s.game.roster);
   const playerSlot = useStore((s) => s.game.playerSlot);
 
-  // Unified render list: committed messages + live streaming bubbles,
+  // Unified render list: committed messages + live "is typing..." bubbles,
   // both sorted by (round, seq). Orchestrator reserves a seq for each NPC
-  // turn at the moment the turn starts and echoes it on chat.chunk events,
-  // so a streaming bubble renders at its eventual committed slot while it's
-  // still being typed out — no visual jump when the NPC commits.
+  // turn at the moment the turn starts and stamps it on the typing.started
+  // event, so the typing bubble renders at the NPC's eventual committed
+  // slot — no visual jump when the message finally lands.
   //
   // A user interjection during an NPC turn commits at a higher seq than the
-  // in-flight NPC, so the NPC's (streaming then committed) bubble stays
-  // above the user's interjection the whole time.
+  // in-flight NPC, so the typing bubble stays above the user's interjection
+  // and is replaced in-place when the chat.line arrives.
   //
-  // System messages with no seq stay in their insertion position via the
-  // stable sort fallback.
-  //
-  // DEFENSIVE orphan-caret guard: if a committed message exists with the
-  // same (round, slot, seq) as a streaming entry, the streaming entry is
-  // skipped at render time even if it failed to be deleted from state.
-  // This is belt-and-suspenders on top of the store's chat.line cleanup.
+  // Defensive orphan-typing guard: if a committed message already exists for
+  // (round, slot, seq) or (round, slot) + kind "npc", skip the typing entry
+  // at render time. This protects against edge cases where typing.ended /
+  // chat.line never deleted the entry in the store.
   type RenderItem =
     | { kind: "committed"; round: number; seq?: number; msg: (typeof messages)[number]; id: string }
-    | { kind: "streaming"; round: number; seq?: number; streamKey: string; entry: (typeof streaming)[string] };
+    | { kind: "typing"; round: number; seq: number; typingKey: string; fromSlot: number };
 
   const renderItems = useMemo<RenderItem[]>(() => {
     const committedKeys = new Set<string>();
@@ -48,24 +45,17 @@ export function ChatTranscript() {
         id: `m-${i}-${msg.seq ?? "x"}`,
       });
     });
-    Object.entries(streaming).forEach(([streamKey, entry]) => {
-      // Skip if a committed message already exists for this turn. Two
-      // checks: exact (round, slot, seq) match (when seq present), or
-      // (round, slot) match for any committed NPC message (covers the
-      // case where chat.chunk events were missing seq so the streaming
-      // entry lives at `R:S:x` and would otherwise never be matched).
-      if (entry.seq != null) {
-        const exactKey = `${entry.round}:${entry.fromSlot}:${entry.seq}`;
-        if (committedKeys.has(exactKey)) return;
-      }
+    Object.entries(typing).forEach(([typingKey, entry]) => {
+      const exactKey = `${entry.round}:${entry.fromSlot}:${entry.seq}`;
+      if (committedKeys.has(exactKey)) return;
       const slotRoundKey = `${entry.round}:${entry.fromSlot}`;
       if (committedSlotRounds.has(slotRoundKey)) return;
       items.push({
-        kind: "streaming",
+        kind: "typing",
         round: entry.round,
         seq: entry.seq,
-        streamKey,
-        entry,
+        typingKey,
+        fromSlot: entry.fromSlot,
       });
     });
     items.sort((a, b) => {
@@ -74,7 +64,7 @@ export function ChatTranscript() {
       return 0;
     });
     return items;
-  }, [messages, streaming]);
+  }, [messages, typing]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
@@ -127,21 +117,19 @@ export function ChatTranscript() {
           );
         }
 
-        // streaming bubble — renders at its seq slot so it does not jump
-        // when the NPC eventually commits.
-        const streamEntry = item.entry;
-        const rosterEntry = roster[streamEntry.fromSlot];
-        const isHuman = streamEntry.fromSlot === playerSlot;
+        // "is typing..." bubble — renders at the NPC's reserved seq slot.
+        const rosterEntry = roster[item.fromSlot];
+        const isHuman = item.fromSlot === playerSlot;
         return (
           <ChatBubble
-            key={`streaming-${item.streamKey}`}
+            key={`typing-${item.typingKey}`}
             speaker={{
-              name: rosterEntry?.name ?? String(streamEntry.fromSlot),
+              name: rosterEntry?.name ?? String(item.fromSlot),
               personaColor: rosterEntry?.personaColor,
               isHuman,
             }}
-            content={streamEntry.text}
-            isStreaming
+            content=""
+            isTyping
           />
         );
       })}

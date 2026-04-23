@@ -315,57 +315,104 @@ local function append_event(state, entry)
     end
 end
 
--- Section I: chat streaming turn handler ------------------------------------
+-- Section I: chat turn handler (blocking, non-streaming) -------------------
+--
+-- Phase 3.1 UX change: we no longer stream chunks to the orchestrator/SPA.
+-- Instead the orchestrator publishes typing.started / typing.ended events
+-- and the SPA renders a "{name} is typing..." placeholder bubble. Here we
+-- just run llm.generate blocking (in a coroutine so we can race a timeout,
+-- CANCEL, and abort.turn), then send the full text as a single chat.submit.
+
+local function extract_generate_text(res)
+    -- framework/llm's blocking generate response shape varies — accept a
+    -- plain string, a {content=...}/{text=...} table, or a nested
+    -- {result={...}} table. Return the first plausible string found or "".
+    if type(res) == "string" then return res end
+    if type(res) ~= "table" then return "" end
+    for k, v in pairs(res) do
+        if (k == "content" or k == "text") and type(v) == "string" then
+            return v
+        end
+        if k == "result" and type(v) == "table" then
+            for k2, v2 in pairs(v) do
+                if (k2 == "content" or k2 == "text") and type(v2) == "string" then
+                    return v2
+                end
+            end
+        end
+    end
+    return ""
+end
 
 local function run_chat_turn(state, round, is_mandatory)
     assert_stable_hash(state)
     state.round = round
-    local CHUNK_TOPIC = "llm.chat.chunk:" .. tostring(process.pid())
-    local chunk_ch = process.listen(CHUNK_TOPIC)
-    local deadline = time.after(CHAT_CAP_S)
-    local proc_ev = process.events()
 
     local p = build_chat_prompt(state, is_mandatory)
-    -- Hard ceiling on streamed output: ~60 tokens fits 1-2 short sentences and
-    -- prevents one NPC from monopolizing the day window. Pairs with the
-    -- "1-2 sentences" directive in build_chat_prompt.
-    local _, gen_err = llm.generate(p, {
-        model = MODEL,
-        max_tokens = 80,
-        stream = { reply_to = process.pid(), topic = CHUNK_TOPIC },
-    })
-    if gen_err then
-        local cls = classify(gen_err)
-        persist_error(state.npc_id, "chat", gen_err, 0)
-        process.unlisten(chunk_ch)
-        process.send(state.parent_pid, "chat.decline", {
-            from_slot = state.slot, round = round,
-            reason = "llm_" .. (cls.reason or "error"),
-        })
-        pe.publish_event("system", "npc_turn_skipped", "/" .. state.game_id, {
-            npc_id = state.npc_id, slot = state.slot, round = round, reason = "chat_gen_error",
-        })
-        return
-    end
 
-    local buf = {}
-    local chunk_seq = 0
+    -- Blocking generate in a coroutine so the main select loop can still
+    -- race a deadline, CANCEL, and abort.turn against the LLM call.
+    local result_ch = channel.new(1)
+    coroutine.spawn(function()
+        local res, err = llm.generate(p, {
+            model = MODEL,
+            max_tokens = 80,
+        })
+        result_ch:send({ res = res, err = err })
+    end)
+
+    local deadline = time.after(CHAT_CAP_S)
+    local proc_ev = process.events()
+    local inbox = process.inbox()
+
     while true do
-        local cases = {
-            chunk_ch:case_receive(),
+        local r = channel.select({
+            result_ch:case_receive(),
             deadline:case_receive(),
             proc_ev:case_receive(),
-            process.inbox():case_receive(),
-        }
-        local r = channel.select(cases)
+            inbox:case_receive(),
+        })
+
         if not r.ok or r.channel == deadline then
-            process.unlisten(chunk_ch)
+            persist_error(state.npc_id, "chat", { type = "TIMEOUT", message = CHAT_CAP_S }, 0)
             process.send(state.parent_pid, "chat.decline", {
                 from_slot = state.slot, round = round, reason = "timeout",
             })
             return
-        end
-        if r.channel == proc_ev then
+
+        elseif r.channel == result_ch then
+            local rv = r.value
+            local rv_err, rv_res
+            if type(rv) == "table" then
+                for k, v in pairs(rv) do
+                    if k == "err" then rv_err = v end
+                    if k == "res" then rv_res = v end
+                end
+            end
+            if rv_err then
+                local cls = classify(rv_err)
+                persist_error(state.npc_id, "chat", rv_err, 0)
+                process.send(state.parent_pid, "chat.decline", {
+                    from_slot = state.slot, round = round,
+                    reason = "llm_" .. (cls.reason or "error"),
+                })
+                pe.publish_event("system", "npc_turn_skipped", "/" .. state.game_id, {
+                    npc_id = state.npc_id, slot = state.slot, round = round, reason = "chat_gen_error",
+                })
+                return
+            end
+            local full = extract_generate_text(rv_res)
+            -- Defensive: strip a trailing "DECLINE" / "DECLINED" token in
+            -- case the model echoes the word from cached context. Both
+            -- turns are mandatory; DECLINE is never instructed.
+            full = full:gsub("[%s%p]*[Dd][Ee][Cc][Ll][Ii][Nn][Ee][Dd]?[%s%p]*$", "")
+            process.send(state.parent_pid, "chat.submit", {
+                from_slot = state.slot, round = round,
+                text = full, kind = "npc",
+            })
+            return
+
+        elseif r.channel == proc_ev then
             local event = r.value
             if type(event) == "table" then
                 local ekind
@@ -373,77 +420,24 @@ local function run_chat_turn(state, round, is_mandatory)
                     if k == "kind" then ekind = v end
                 end
                 if ekind == process.event.CANCEL then
-                    process.unlisten(chunk_ch)
                     return
                 end
             end
-        elseif r.channel == process.inbox() then
+
+        elseif r.channel == inbox then
             local msg = r.value
-            if type(msg) == "table" then
-                local tp = nil
-                -- Use method call only if it's a process.Message
-                if msg.topic then tp = msg:topic() end
+            if type(msg) == "table" and msg.topic then
+                local tp = msg:topic()
                 if tp == "abort.turn" then
-                    process.unlisten(chunk_ch)
                     process.send(state.parent_pid, "chat.decline", {
                         from_slot = state.slot, round = round, reason = "aborted_by_orchestrator",
                     })
                     return
                 end
             end
-            -- Ignore other inbox topics during streaming
-        elseif r.channel == chunk_ch then
-            local chunk_msg = r.value
-            local chunk = {}
-            if type(chunk_msg) == "table" then
-                -- subscription event: payload via method
-                local ok_p, pdata = pcall(function()
-                    return chunk_msg:payload():data()
-                end)
-                if ok_p and type(pdata) == "table" then
-                    chunk = pdata
-                else
-                    for k, v in pairs(chunk_msg) do chunk[k] = v end
-                end
-            end
-            local ctype
-            for k, v in pairs(chunk) do
-                if k == "type" then ctype = v end
-            end
-            if ctype == "chunk" then
-                chunk_seq = chunk_seq + 1
-                local content = ""
-                for k, v in pairs(chunk) do
-                    if k == "content" then content = tostring(v or "") end
-                end
-                table.insert(buf, content)
-                process.send(state.parent_pid, "chat.stream.chunk", {
-                    from_slot = state.slot, round = round,
-                    chunk_seq = chunk_seq, text = content,
-                })
-            elseif ctype == "done" then
-                process.unlisten(chunk_ch)
-                local full = table.concat(buf)
-                -- Defensive: strip a trailing "DECLINE" / "DECLINED" token (with
-                -- optional surrounding whitespace/punctuation) in case the model
-                -- echoes it from its training or cached context. Both turns are
-                -- mandatory now, so DECLINE is never instructed — but models can
-                -- still emit it occasionally.
-                full = full:gsub("[%s%p]*[Dd][Ee][Cc][Ll][Ii][Nn][Ee][Dd]?[%s%p]*$", "")
-                process.send(state.parent_pid, "chat.submit", {
-                    from_slot = state.slot, round = round,
-                    text = full, kind = "npc",
-                })
-                return
-            elseif ctype == "error" then
-                process.unlisten(chunk_ch)
-                persist_error(state.npc_id, "chat", chunk, 0)
-                process.send(state.parent_pid, "chat.decline", {
-                    from_slot = state.slot, round = round, reason = "stream_error",
-                })
-                return
-            end
-            -- "thinking" / "tool_call" / etc. — ignore
+            -- Other inbox topics during the LLM call are ignored; the
+            -- orchestrator doesn't send day.turn/vote.prompt mid-turn
+            -- under the current FSM.
         end
     end
 end

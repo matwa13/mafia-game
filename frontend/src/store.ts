@@ -1,19 +1,17 @@
 import { create } from "zustand";
 import type { GameState, ChatMessage, VoteState } from "./types";
 
-interface StreamingEntry {
+interface TypingEntry {
   fromSlot: number;
   round: number;
-  text: string;
-  // Reserved seq from the orchestrator. Lets ChatTranscript position the
-  // streaming bubble at its eventual committed slot while it's still
-  // streaming (no "jumps into place" when the NPC commits).
-  seq?: number;
+  // Reserved seq from the orchestrator. Used by ChatTranscript to position
+  // the typing bubble at the NPC's eventual committed slot.
+  seq: number;
 }
 
 interface ChatSlice {
   messages: ChatMessage[];
-  streaming: Record<string, StreamingEntry>;
+  typing: Record<string, TypingEntry>;
 }
 
 interface StoreState {
@@ -53,7 +51,7 @@ function asRecord(v: unknown): Record<string, any> {
 
 export const useStore = create<StoreState>((set, get) => ({
   game: initialGame,
-  chat: { messages: [], streaming: {} },
+  chat: { messages: [], typing: {} },
   vote: initialVote,
   send: (_type: string, _data: unknown) => {
     console.warn("[store] send called before ws hook set it");
@@ -100,34 +98,38 @@ export const useStore = create<StoreState>((set, get) => ({
       return;
     }
 
-    if (topic === "game_chat_chunk") {
+    if (topic === "game_typing_started") {
       const round = Number(data.round);
       const fromSlot = Number(data.from_slot);
-      const chunkSeq = Number(data.chunk_seq);
-      const text = String(data.text ?? "");
-      const seq = data.seq != null ? Number(data.seq) : undefined;
-      const key = `${round}:${fromSlot}:${seq ?? "x"}`;
-      // chunk_seq resets to 1 at the start of each turn. If we see chunk_seq=1
-      // while an existing streaming buffer lingers for this (round, slot, seq),
-      // treat as a new turn and reset. The seq is included in the key so
-      // consecutive turns from the same NPC in the same round use different
-      // keys (turn 1 seq=5, turn 2 seq=6) and never accumulate into each
-      // other's buffer.
-      const shouldReset = chunkSeq === 1;
+      const seq = Number(data.seq);
+      if (!Number.isFinite(round) || !Number.isFinite(fromSlot) || !Number.isFinite(seq)) return;
+      const key = `${round}:${fromSlot}:${seq}`;
       set((s) => ({
         chat: {
           ...s.chat,
-          streaming: {
-            ...s.chat.streaming,
-            [key]: {
-              fromSlot,
-              round,
-              seq,
-              text: shouldReset ? text : (s.chat.streaming[key]?.text ?? "") + text,
-            },
-          },
+          typing: { ...s.chat.typing, [key]: { fromSlot, round, seq } },
         },
       }));
+      return;
+    }
+
+    if (topic === "game_typing_ended") {
+      const round = Number(data.round);
+      const fromSlot = Number(data.from_slot);
+      const seq = data.seq != null ? Number(data.seq) : undefined;
+      set((s) => {
+        const newTyping = { ...s.chat.typing };
+        if (seq != null) {
+          delete newTyping[`${round}:${fromSlot}:${seq}`];
+        } else {
+          // Defensive: if seq missing, clear any typing for this (round, slot).
+          const prefix = `${round}:${fromSlot}:`;
+          for (const k of Object.keys(newTyping)) {
+            if (k.startsWith(prefix)) delete newTyping[k];
+          }
+        }
+        return { chat: { ...s.chat, typing: newTyping } };
+      });
       return;
     }
 
@@ -145,23 +147,18 @@ export const useStore = create<StoreState>((set, get) => ({
         text: String(data.text ?? ""),
         kind: (data.kind as ChatMessage["kind"]) ?? "npc",
       };
-      // Defensive cleanup: delete EVERY streaming entry that matches the
-      // (round, slot) prefix, not just the exact (round, slot, seq) key.
-      // An orphan can persist if the orchestrator's chunk payload omitted
-      // seq for any reason (stale process code, event-bus serialization,
-      // re-emit path), or if a prior turn chat.declined and thus never
-      // published a chat.line. Either would leave a blinking caret on a
-      // "ghost" streaming bubble. Prefix-match cleans both up.
+      // Clear any typing bubble for this (round, slot) — commit implicitly
+      // ends typing. Prefix-match is defensive in case seq mismatched.
       const prefix = `${round}:${fromSlot}:`;
       set((s) => {
-        const newStreaming = { ...s.chat.streaming };
-        for (const k of Object.keys(newStreaming)) {
-          if (k.startsWith(prefix)) delete newStreaming[k];
+        const newTyping = { ...s.chat.typing };
+        for (const k of Object.keys(newTyping)) {
+          if (k.startsWith(prefix)) delete newTyping[k];
         }
         return {
           chat: {
             messages: [...s.chat.messages, msg],
-            streaming: newStreaming,
+            typing: newTyping,
           },
         };
       });
