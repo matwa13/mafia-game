@@ -598,6 +598,19 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
     local day_duration_s = dev_mode_flag and "60s" or "120s"
     local per_speaker_s  = dev_mode_flag and "12s" or "25s"
 
+    -- Drain any pre-queued messages (e.g., stale player.chat from night phase).
+    -- run_night_stub does not read the inbox, so if the UI lets the human type
+    -- during night, those messages sit in the orchestrator's inbox and would
+    -- be committed at seq=1 here — rendering above all NPC messages in the
+    -- SPA transcript. The frontend disables the input during non-day phases
+    -- as the primary guard; this is a belt-and-suspenders sweep.
+    local drain_ch = time.after("10ms")
+    while true do
+        local r = channel.select({ inbox:case_receive(), drain_ch:case_receive() })
+        if not r.ok or r.channel == drain_ch then break end
+        -- Discard (do not commit, do not re-publish).
+    end
+
     -- Randomized-start round-robin over alive NPC slots (exclude player).
     math.randomseed(math.floor(tonumber(rng_seed) or 0) + round * 1000)
     local living_npc_slots = {}

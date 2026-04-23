@@ -6,13 +6,27 @@ const MAX_CHARS = 500;
 
 export function InterjectionInput() {
   const chatLocked = useStore((s) => s.game.chatLocked);
+  const phase = useStore((s) => s.game.phase);
   const round = useStore((s) => s.game.round);
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Input is only active during day discussion. Night / vote / reveal / ended
+  // all suppress sending. This prevents player.chat messages from queuing in
+  // the orchestrator's inbox while the orchestrator isn't in the day-
+  // discussion loop — which otherwise leak into day 1 as the first bubble.
+  const canSend = phase === "day" && !chatLocked;
+  const placeholder = canSend
+    ? "Say something..."
+    : phase === "night"
+      ? "Night — discussion closed."
+      : chatLocked
+        ? "Discussion is locked."
+        : "Waiting...";
+
   function handleSend() {
     const trimmed = text.trim().slice(0, MAX_CHARS);
-    if (!trimmed || chatLocked) return;
+    if (!trimmed || !canSend) return;
     useStore.getState().send("game_chat_send", { text: trimmed, round });
     setText("");
     if (textareaRef.current) {
@@ -48,11 +62,11 @@ export function InterjectionInput() {
       <textarea
         ref={textareaRef}
         aria-label="Chat input"
-        disabled={chatLocked}
+        disabled={!canSend}
         value={text}
         onChange={handleInput}
         onKeyDown={handleKeyDown}
-        placeholder={chatLocked ? "Discussion is locked." : "Say something..."}
+        placeholder={placeholder}
         rows={1}
         className="flex-1 rounded-md px-3 py-2 text-base resize-none outline-none focus-visible:ring-2"
         style={{
@@ -69,7 +83,7 @@ export function InterjectionInput() {
       <Button
         variant="primary"
         size="md"
-        disabled={chatLocked || !text.trim()}
+        disabled={!canSend || !text.trim()}
         onClick={handleSend}
         aria-label="Send message"
       >
