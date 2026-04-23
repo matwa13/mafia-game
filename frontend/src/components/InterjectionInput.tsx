@@ -34,6 +34,11 @@ export function InterjectionInput() {
     }
   }
 
+  function handleAdvance() {
+    if (!canSend) return;
+    useStore.getState().send("game_advance_phase", { round });
+  }
+
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -88,6 +93,15 @@ export function InterjectionInput() {
         aria-label="Send message"
       >
         Send
+      </Button>
+      <Button
+        variant="secondary"
+        size="md"
+        disabled={!canSend}
+        onClick={handleAdvance}
+        aria-label="End discussion and go to vote"
+      >
+        End discussion →
       </Button>
     </div>
   );

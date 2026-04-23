@@ -160,6 +160,16 @@ local function run(args)
                     round = tonumber(data.round) or 0,
                 })
 
+            elseif topic == "advance_phase" and active then
+                -- User clicked "End discussion →". Forward the signal to the
+                -- orchestrator's run_day_discussion_streaming loop which will
+                -- abort the in-flight NPC turn and exit to the vote phase.
+                -- No from_slot override / no clamp needed — payload carries
+                -- no user-supplied data beyond the intent signal.
+                process.send(active.orch_pid, "player.advance_phase", {
+                    round = tonumber(data.round) or 0,
+                })
+
             elseif not active then
                 logger:debug("[game_plugin] command with no active game; ignoring",
                     { topic = tostring(topic) })

@@ -601,12 +601,17 @@ end
 local function run_day_discussion_streaming(game_id, round, alive, player_slot, npc_pids,
                                             dev_mode_flag, chat_seq, inbox,
                                             rng_seed, roles, slot_persona, roster_names)
-    -- Day window must hold ~4-5 speakers at ~6-10s each (LLM streaming +
-    -- commit). 15s was too tight post-max_tokens=80 — pairs with npc.lua
-    -- build_chat_prompt "1-2 sentences" directive. Per-speaker cap widened
-    -- slightly so a slightly slow LLM response still completes cleanly.
-    local day_duration_s = dev_mode_flag and "60s" or "120s"
-    local per_speaker_s  = dev_mode_flag and "12s" or "25s"
+    -- Day discussion is now USER-DRIVEN: every living NPC speaks both
+    -- mandatory turns in sequence, and the phase only transitions to VOTE
+    -- when either (a) all NPCs have finished their 2 turns, or (b) the
+    -- user clicks "End discussion →" in the SPA, which sends
+    -- `game_advance_phase` → `player.advance_phase` into this inbox.
+    --
+    -- The previous wall-clock day_deadline was removed because it could
+    -- cut off NPCs mid-round before they'd spoken. Per-speaker cap stays —
+    -- it only protects against a hung/stuck LLM call on a single turn
+    -- (≈12s dev / 25s prod).
+    local per_speaker_s = dev_mode_flag and "12s" or "25s"
 
     -- Drain any pre-queued messages (e.g., stale player.chat from night phase).
     -- run_night_stub does not read the inbox, so if the UI lets the human type
@@ -635,8 +640,9 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
         living_npc_slots[i], living_npc_slots[j] = living_npc_slots[j], living_npc_slots[i]
     end
 
-    local day_deadline = time.after(day_duration_s)
-    local day_deadline_fired = false
+    -- User-driven advance flag. Set true when a `player.advance_phase`
+    -- message lands in the orchestrator's inbox during day discussion.
+    local advance_requested = false
 
     for _, slot in ipairs(living_npc_slots) do
         if not alive[slot] then
@@ -666,11 +672,10 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
             local per_speaker_ch = time.after(per_speaker_s)
             local done_this_msg = false
             while not done_this_msg do
-                local cases = { inbox:case_receive(), per_speaker_ch:case_receive() }
-                if not day_deadline_fired then
-                    table.insert(cases, day_deadline:case_receive())
-                end
-                local r = channel.select(cases)
+                local r = channel.select({
+                    inbox:case_receive(),
+                    per_speaker_ch:case_receive(),
+                })
 
                 if r.channel == inbox then
                     local msg = r.value
@@ -723,34 +728,33 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                             end
                             -- Do NOT abort the NPC turn — let it finish.
                         end
-                        -- Ignore other topics during day turn.
+
+                    elseif tp == "player.advance_phase" then
+                        -- User clicked "End discussion →". Abort the in-flight
+                        -- NPC turn and flag both loops to exit. We exit this
+                        -- inner while via done_this_msg = true; the outer
+                        -- for-loop exits via the advance_requested check.
+                        logger:info("[orchestrator] player.advance_phase received",
+                            { slot = slot, msg_index = msg_index })
+                        advance_requested = true
+                        process.send(npc_pid, "abort.turn", {})
+                        done_this_msg = true
 
                     end
+                    -- Ignore other topics during day turn.
 
                 elseif r.channel == per_speaker_ch then
                     logger:warn("[orchestrator] per-speaker cap hit",
                         { slot = slot, msg_index = msg_index })
                     process.send(npc_pid, "abort.turn", {})
                     done_this_msg = true
-
-                elseif (not day_deadline_fired) and r.channel == day_deadline then
-                    day_deadline_fired = true
-                    if msg_index > 1 then
-                        -- Mid 2nd-msg: abort and skip.
-                        process.send(npc_pid, "abort.turn", {})
-                        done_this_msg = true
-                    end
-                    -- Mid 1st-msg: let it finish (D-06).
                 end
             end
 
-            if day_deadline_fired then
-                if msg_index == 1 and done_this_msg then break end
-                if msg_index > 1 then break end
-            end
+            if advance_requested then break end
         end
 
-        if day_deadline_fired then break end
+        if advance_requested then break end
         ::continue_slot::
     end
 
@@ -763,7 +767,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
 
     pe.publish_event("system", "chat_locked", "/" .. game_id, {
         round = round,
-        reason = day_deadline_fired and "deadline" or "all_spoken",
+        reason = advance_requested and "user_advance" or "all_spoken",
     })
     emit_game_state_changed(game_id, alive, roles, slot_persona,
         roster_names, player_slot, "vote", round, true)
