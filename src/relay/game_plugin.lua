@@ -70,10 +70,10 @@ local function run(args)
             local msg = r.value
             local topic = msg and msg:topic() or ""
             local payload = (msg and msg:payload() and msg:payload():data()) or {}
-            local conn_pid = payload.conn_pid
+            local conn_pid = tostring(payload.conn_pid or "")
             local data = payload.data or {}
 
-            if type(conn_pid) == "string" and not conns[conn_pid] then
+            if conn_pid ~= "" and not conns[conn_pid] then
                 conns[conn_pid] = { joined_at = time.now():unix() }
             end
 
@@ -176,7 +176,7 @@ local function run(args)
                 -- different game — drop
             else
                 -- kind -> client_topic mapping
-                local kind = evt.kind
+                local kind = tostring(evt.kind or "")
                 local client_topic_map = {
                     ["chat.chunk"]          = "game_chat_chunk",
                     ["chat.line"]           = "game_chat_line",
