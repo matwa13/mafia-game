@@ -1343,8 +1343,21 @@ local function run(args)
         winner, living_mafia, living_villagers = check_win(state.alive, state.roles)
         if winner then break end
 
-        emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
-            state.roster_names, player_slot, "day", state.round, false)
+        -- Emit game_state_changed WITH last_eliminated so the SPA can name the
+        -- victim ("ALICE WAS ELIMINATED"). Without this, the store falls back
+        -- to String(victim_slot) and renders "2 WAS ELIMINATED".
+        -- night_result is the victim_slot returned by run_night_stub.
+        local night_victim_slot = night_result
+        if type(night_victim_slot) == "number" and state.roster_names then
+            local vname = state.roster_names[night_victim_slot] or ("slot-" .. night_victim_slot)
+            local vrole = state.roles and state.roles[night_victim_slot] or nil
+            emit_game_state_changed_elim(game_id, state.alive, state.roles, state.slot_persona,
+                state.roster_names, player_slot, "day", state.round,
+                night_victim_slot, vname, vrole, "night")
+        else
+            emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
+                state.roster_names, player_slot, "day", state.round, false)
+        end
 
         local ok_day, day_err
         if npc_mode() == "real" then
