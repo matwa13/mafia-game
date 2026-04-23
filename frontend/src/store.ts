@@ -99,8 +99,15 @@ export const useStore = create<StoreState>((set, get) => ({
     if (topic === "game_chat_chunk") {
       const round = Number(data.round);
       const fromSlot = Number(data.from_slot);
+      const chunkSeq = Number(data.chunk_seq);
       const text = String(data.text ?? "");
       const key = `${round}:${fromSlot}`;
+      // chunk_seq resets to 1 at the start of each turn. If we see chunk_seq=1
+      // while an existing streaming buffer lingers for this (round, slot),
+      // it means turn 2 has started before turn 1's chat.line cleared the
+      // buffer — treat as a new turn and reset. Without this, turn 2's chunks
+      // would visually concatenate into the turn-1 streaming bubble.
+      const shouldReset = chunkSeq === 1;
       set((s) => ({
         chat: {
           ...s.chat,
@@ -109,7 +116,7 @@ export const useStore = create<StoreState>((set, get) => ({
             [key]: {
               fromSlot,
               round,
-              text: (s.chat.streaming[key]?.text ?? "") + text,
+              text: shouldReset ? text : (s.chat.streaming[key]?.text ?? "") + text,
             },
           },
         },
