@@ -78,29 +78,22 @@ export function ChatTranscript() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
-  const stuckToBottom = useRef(true);
 
-  // useLayoutEffect runs after DOM mutations but BEFORE paint — the
-  // right hook for scroll adjustments so the viewport catches up to
-  // newly-added content without a visible lag or jitter. Scrolling via
-  // a bottom sentinel (scrollIntoView) is more reliable than
-  // scrollTop=scrollHeight inside a flex container.
+  // Always scroll to bottom when renderItems changes (new message committed
+  // OR streaming text appended). Previous "stuck to bottom" gate was fragile
+  // — the onScroll listener fired during programmatic scrollIntoView, saw a
+  // transient distanceFromBottom > threshold, and flipped the stuck flag off,
+  // permanently disabling subsequent auto-scrolls. For this single-player
+  // chat UX, always-scroll is the simpler and more reliable default.
+  // useLayoutEffect runs synchronously after DOM mutations and before paint,
+  // so the scroll happens before the browser draws the new frame.
   useLayoutEffect(() => {
-    if (!stuckToBottom.current) return;
     bottomSentinelRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
-  }, [renderItems.length, renderItems]);
-
-  function onScroll() {
-    const el = scrollRef.current;
-    if (!el) return;
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    stuckToBottom.current = distanceFromBottom < 40;
-  }
+  }, [renderItems]);
 
   return (
     <div
       ref={scrollRef}
-      onScroll={onScroll}
       role="log"
       aria-live="polite"
       aria-atomic="false"
