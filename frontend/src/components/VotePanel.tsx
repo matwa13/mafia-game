@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useStore } from "../store";
 import { Button } from "./primitives/Button";
-import { VoteRevealCard } from "./VoteRevealCard";
+import { VoteBubble } from "./VoteBubble";
 
 export function VotePanel() {
   const game = useStore((s) => s.game);
@@ -10,11 +10,14 @@ export function VotePanel() {
   const [voted, setVoted] = useState(false);
 
   const { roster, playerSlot, round } = game;
+  const playerEntry = playerSlot != null ? roster[playerSlot] : undefined;
+  const playerDead = playerEntry ? !playerEntry.alive : false;
   const livingPlayers = Object.entries(roster)
     .filter(([slot, r]) => r.alive && Number(slot) !== playerSlot)
     .map(([slot, r]) => ({ slot: Number(slot), entry: r }));
 
-  const notYetVotedCount = livingPlayers.length - vote.perVoter.length;
+  const npcVotesIn = vote.perVoter.filter((v) => v.from_slot !== playerSlot).length;
+  const notYetVotedCount = livingPlayers.length - npcVotesIn;
 
   function castVote() {
     if (selectedSlot == null || voted) return;
@@ -51,45 +54,23 @@ export function VotePanel() {
         </p>
       )}
 
-      {/* Voter cards */}
-      <div className="flex flex-wrap gap-3 justify-center">
-        {vote.revealed
-          ? vote.perVoter.map((v, i) => {
-              const targetEntry = roster[v.vote_for_slot ?? -1];
-              const voterEntry = roster[v.from_slot];
-              return (
-                <VoteRevealCard
-                  key={v.from_slot}
-                  voter={v}
-                  targetName={targetEntry?.name ?? "—"}
-                  personaColor={voterEntry?.personaColor}
-                  index={i}
-                />
-              );
-            })
-          : livingPlayers.map(({ slot, entry }) => (
-              <div
-                key={slot}
-                className="flex flex-col items-center justify-center rounded-md"
-                style={{
-                  width: 140,
-                  height: 180,
-                  background: "var(--color-surface)",
-                  boxShadow: "var(--shadow-1)",
-                  border: "1px solid var(--color-border)",
-                }}
-              >
-                <span
-                  className="text-3xl"
-                  style={{ color: "var(--color-text-muted)" }}
-                >
-                  ?
-                </span>
-                <span className="text-sm mt-2" style={{ color: "var(--color-text-muted)" }}>
-                  {entry.name}
-                </span>
-              </div>
-            ))}
+      {/* Vote bubbles — one per living NPC. Each starts in "Thinking..."
+          state and flips to the revealed reasoning as its vote arrives. */}
+      <div className="flex flex-col gap-3 w-full items-center">
+        {livingPlayers.map(({ slot, entry }) => {
+          const cast = vote.perVoter.find((v) => v.from_slot === slot);
+          const targetEntry = cast ? roster[cast.vote_for_slot ?? -1] : undefined;
+          return (
+            <VoteBubble
+              key={slot}
+              voterName={entry.name}
+              personaColor={entry.personaColor}
+              thinking={!cast}
+              targetName={targetEntry?.name}
+              reasoning={cast?.reasoning}
+            />
+          );
+        })}
       </div>
 
       {/* Tally row after reveal */}
@@ -129,8 +110,19 @@ export function VotePanel() {
         </div>
       )}
 
-      {/* Your vote selector */}
-      {!voted && !vote.revealed && (
+      {/* Dead player — no voting rights */}
+      {playerDead && !vote.revealed && (
+        <p
+          className="text-sm text-center"
+          role="status"
+          style={{ color: "var(--color-text-muted)" }}
+        >
+          You are dead. You no longer have voting rights.
+        </p>
+      )}
+
+      {/* Your vote selector — only for living player, pre-reveal */}
+      {!playerDead && !voted && !vote.revealed && (
         <div className="flex flex-col gap-3 w-full max-w-[480px]">
           <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>
             Your vote:

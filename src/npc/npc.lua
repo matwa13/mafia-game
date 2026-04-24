@@ -39,8 +39,8 @@ local VOTE_SCHEMA = {
             additionalProperties = { type = "string", maxLength = 60 },
         },
         vote_target = {
-            type = { "string", "null" },
-            description = "Name of the player you vote to eliminate, or null for abstain.",
+            type = "string",
+            description = "Name of a living non-self player you vote to eliminate. Must be one of the players in the ROSTER. Abstention is not allowed.",
         },
         reasoning = {
             type = "string",
@@ -235,7 +235,7 @@ Update your private suspicion of each named player in this round, then cast your
 Rules:
 - suspicion_updates are DELTAS in [-20, +20] keyed by player NAME. Add for Mafia-aligned behavior, subtract for Villager-aligned behavior.
 - reflection_notes are short (<=60 chars) per-player reads this round, keyed by NAME.
-- vote_target is the NAME of a living non-self player, or null to abstain.
+- vote_target MUST be the NAME of a living non-self player. Abstention is not allowed — you are required to vote even with imperfect information. Pick whoever feels most suspicious right now.
 - reasoning must quote or clearly reference something a specific player said today; address them by name.
 - Do NOT vote for yourself. Do NOT bandwagon without a specific reason.]]
     p:add_user(tail .. directive)

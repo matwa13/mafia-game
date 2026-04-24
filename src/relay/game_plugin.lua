@@ -202,6 +202,7 @@ local function run(args)
                     ["player.eliminated"]   = "game_eliminated",
                     ["night.resolved"]      = "game_eliminated",  -- same client shape (Phase 4 ready)
                     ["vote.tied"]           = "game_vote_tied",
+                    ["vote.cast.received"]  = "game_vote_cast_received",  -- incremental per-vote reveal
                     ["votes_revealed"]      = "game_votes_revealed",
                     ["game.ended"]          = "game_game_ended",
                     ["game_state_changed"]  = "game_state_changed",

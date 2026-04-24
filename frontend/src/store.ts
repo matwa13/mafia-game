@@ -199,13 +199,32 @@ export const useStore = create<StoreState>((set, get) => ({
       return;
     }
 
+    if (topic === "game_vote_cast_received") {
+      const fromSlot = Number(data.from_slot);
+      if (!Number.isFinite(fromSlot)) return;
+      const entry = {
+        from_slot: fromSlot,
+        from_name: String(data.from_name ?? ""),
+        vote_for_slot: data.vote_for_slot != null ? Number(data.vote_for_slot) : null,
+        reasoning: String(data.reasoning ?? ""),
+      };
+      set((s) => {
+        if (s.vote.perVoter.some((v) => v.from_slot === fromSlot)) return s;
+        return { vote: { ...s.vote, perVoter: [...s.vote.perVoter, entry] } };
+      });
+      return;
+    }
+
     if (topic === "game_votes_revealed") {
+      const finalPerVoter = Array.isArray(data.per_voter) ? data.per_voter : [];
       set((s) => ({
         vote: {
           ...s.vote,
           revealed: true,
           tally: asRecord(data.tally) as Record<number, number>,
-          perVoter: Array.isArray(data.per_voter) ? data.per_voter : [],
+          // Prefer the authoritative `per_voter` payload; the incremental
+          // stream populated it earlier but this is the source of truth.
+          perVoter: finalPerVoter.length > 0 ? finalPerVoter : s.vote.perVoter,
           tied: Boolean(data.tied),
         },
       }));

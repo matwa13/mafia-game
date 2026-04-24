@@ -387,8 +387,10 @@ end
 -- roster_names_map: state.roster_names (may be nil). player_sl: state.player_slot.
 -- Build roster snapshot from the canonical Phase 2 alive/roles tables.
 -- alive_map is state.alive — the SOLE liveness field. Role is revealed only
--- when alive_map[slot] == false (slot is dead). No parallel eliminated-slot table.
-local function build_gsc_roster(alive_map, roles_map, slot_persona_map, roster_names_map, player_sl)
+-- when alive_map[slot] == false (slot is dead), OR when reveal_all is true
+-- (game-ended full reveal). No parallel eliminated-slot table.
+local function build_gsc_roster(alive_map, roles_map, slot_persona_map,
+                                 roster_names_map, player_sl, reveal_all)
     -- Use STRING keys for the outer map so the Wippy JSON serializer emits a
     -- JSON object, not a JSON array. A 1-indexed dense integer-keyed Lua table
     -- gets serialized as `[val1, val2, ...]` (0-indexed on the wire); the SPA's
@@ -417,7 +419,7 @@ local function build_gsc_roster(alive_map, roles_map, slot_persona_map, roster_n
         -- (alive_map is state.alive: {[integer]:boolean}, canonical Phase 2 field).
         local is_alive = (rawget(alive_map, slot) == true)
         local revealed_role = nil
-        if not is_alive then
+        if not is_alive or reveal_all then
             revealed_role = roles_map[slot]
         end
         roster[tostring(slot)] = { name = name, alive = is_alive, role = revealed_role }
@@ -430,8 +432,9 @@ end
 local function emit_game_state_changed(game_id, alive_map, roles_map,
                                         slot_persona_map, roster_names_map,
                                         player_sl, phase, round, chat_locked)
+    local reveal_all = (phase == "ended")
     local roster = build_gsc_roster(alive_map, roles_map, slot_persona_map,
-                                     roster_names_map, player_sl)
+                                     roster_names_map, player_sl, reveal_all)
     pe.publish_event("system", "game_state_changed", "/" .. game_id, {
         phase = phase or "unknown",
         round = round or 0,
@@ -452,8 +455,9 @@ local function emit_game_state_changed_elim(game_id, alive_map, roles_map,
                                              player_sl, phase, round,
                                              elim_slot, elim_name, elim_role, elim_cause,
                                              chat_locked_flag)
+    local reveal_all = (phase == "ended")
     local roster = build_gsc_roster(alive_map, roles_map, slot_persona_map,
-                                     roster_names_map, player_sl)
+                                     roster_names_map, player_sl, reveal_all)
     pe.publish_event("system", "game_state_changed", "/" .. game_id, {
         phase = phase or "unknown",
         round = round or 0,
@@ -1052,19 +1056,34 @@ local function run_vote_round_llm(game_id, round, alive, roles, player_slot, npc
     local vote_cap = time.after(dev_mode() and "120s" or "180s")
     while true do
         local r = channel.select({ inbox:case_receive(), vote_cap:case_receive() })
-        if not r.ok or r.channel == vote_cap then break end
+        if not r.ok or r.channel == vote_cap then
+            logger:warn("[orchestrator] vote collection timeout",
+                { round = round, collected = count_map(votes_by_slot), needed = needed })
+            break
+        end
         local msg = r.value
-        if msg:topic() == "vote.cast" then
+        local tp = msg:topic()
+        if tp == "vote.cast" then
             local raw = (msg:payload():data()) or {}
-            if raw.round == round and raw.from_slot and not votes_by_slot[raw.from_slot] then
+            if (raw.round == round) and raw.from_slot and not votes_by_slot[raw.from_slot] then
                 votes_by_slot[raw.from_slot] = {
                     vote_for_slot = raw.vote_for_slot,
                     reasoning = tostring(raw.reasoning or ""),
                 }
+                -- Incremental reveal: publish each vote as it lands so the SPA
+                -- can flip the placeholder bubble to a revealed card without
+                -- waiting for the full `votes_revealed` event at the end.
+                pe.publish_event("public", "vote.cast.received", "/" .. game_id, {
+                    round = round,
+                    from_slot = raw.from_slot,
+                    from_name = (roster_names and roster_names[raw.from_slot])
+                        or ("slot-" .. tostring(raw.from_slot)),
+                    vote_for_slot = raw.vote_for_slot,
+                    reasoning = tostring(raw.reasoning or ""),
+                })
                 if count_map(votes_by_slot) >= needed then break end
             end
         end
-        -- ignore other topics (late streaming chunks, etc.)
     end
 
     -- Persist votes with reasoning strings.
@@ -1082,16 +1101,19 @@ local function run_vote_round_llm(game_id, round, alive, roles, player_slot, npc
     end
     db:release()
 
-    -- Tally.
+    -- Tally. Keys are STRINGIFIED slot numbers so the JSON transcoder on the
+    -- WebSocket boundary doesn't see a sparse integer-keyed table (e.g.
+    -- {2: 3, 6: 2}) which it refuses to encode ("cannot encode sparse array").
     local tally = {}
     for _, v in pairs(votes_by_slot) do
         if v.vote_for_slot and alive[v.vote_for_slot] then
-            tally[v.vote_for_slot] = (tally[v.vote_for_slot] or 0) + 1
+            local k = tostring(v.vote_for_slot)
+            tally[k] = (tally[k] or 0) + 1
         end
     end
     local top_slot, top_count, tied = nil, 0, false
     for s, c in pairs(tally) do
-        if c > top_count then top_slot = s; top_count = c; tied = false
+        if c > top_count then top_slot = tonumber(s); top_count = c; tied = false
         elseif c == top_count then tied = true end
     end
     if force_tie then tied = true; top_slot = nil end
