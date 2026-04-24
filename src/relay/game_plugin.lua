@@ -197,18 +197,20 @@ local function run(args)
                 -- kind -> client_topic mapping
                 local kind = tostring(evt.kind or "")
                 local client_topic_map = {
-                    ["chat.line"]           = "game_chat_line",
-                    ["chat_locked"]         = "game_chat_locked",
-                    ["player.eliminated"]   = "game_eliminated",
-                    ["night.resolved"]      = "game_eliminated",  -- same client shape (Phase 4 ready)
-                    ["vote.tied"]           = "game_vote_tied",
-                    ["vote.cast.received"]  = "game_vote_cast_received",  -- incremental per-vote reveal
-                    ["votes_revealed"]      = "game_votes_revealed",
-                    ["game.ended"]          = "game_game_ended",
-                    ["game_state_changed"]  = "game_state_changed",
-                    ["npc_turn_skipped"]    = "game_npc_skipped",  -- diagnostic for UI toast
-                    ["typing.started"]      = "game_typing_started",
-                    ["typing.ended"]        = "game_typing_ended",
+                    ["chat.line"]             = "game_chat_line",
+                    ["chat_locked"]           = "game_chat_locked",
+                    ["player.eliminated"]     = "game_eliminated",
+                    ["night.resolved"]        = "game_eliminated",  -- same client shape (Phase 4 ready)
+                    ["vote.tied"]             = "game_vote_tied",
+                    ["vote.cast.received"]    = "game_vote_cast_received",  -- incremental per-vote reveal
+                    ["votes_revealed"]        = "game_votes_revealed",
+                    ["day.discussion_ready"]  = "game_discussion_ready",    -- user-gated end of day
+                    ["day.vote_complete"]     = "game_vote_complete",       -- user-gated start of next day
+                    ["game.ended"]            = "game_game_ended",
+                    ["game_state_changed"]    = "game_state_changed",
+                    ["npc_turn_skipped"]      = "game_npc_skipped",  -- diagnostic for UI toast
+                    ["typing.started"]        = "game_typing_started",
+                    ["typing.ended"]          = "game_typing_ended",
                 }
                 local ct = client_topic_map[kind]
                 if ct then

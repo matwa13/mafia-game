@@ -8,6 +8,7 @@ export function InterjectionInput() {
   const chatLocked = useStore((s) => s.game.chatLocked);
   const phase = useStore((s) => s.game.phase);
   const round = useStore((s) => s.game.round);
+  const discussionReady = useStore((s) => s.game.discussionReady);
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -16,6 +17,9 @@ export function InterjectionInput() {
   // the orchestrator's inbox while the orchestrator isn't in the day-
   // discussion loop — which otherwise leak into day 1 as the first bubble.
   const canSend = phase === "day" && !chatLocked;
+  // "End discussion" is gated separately: stays disabled until the
+  // orchestrator signals `day.discussion_ready` (all NPCs have spoken).
+  const canAdvance = canSend && discussionReady;
   const placeholder = canSend
     ? "Say something..."
     : phase === "night"
@@ -35,7 +39,7 @@ export function InterjectionInput() {
   }
 
   function handleAdvance() {
-    if (!canSend) return;
+    if (!canAdvance) return;
     useStore.getState().send("game_advance_phase", { round });
   }
 
@@ -97,9 +101,10 @@ export function InterjectionInput() {
       <Button
         variant="secondary"
         size="md"
-        disabled={!canSend}
+        disabled={!canAdvance}
         onClick={handleAdvance}
         aria-label="End discussion and go to vote"
+        title={!discussionReady ? "Wait until all NPCs have spoken" : undefined}
       >
         End discussion →
       </Button>

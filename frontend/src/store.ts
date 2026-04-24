@@ -34,6 +34,8 @@ const initialGame: GameState = {
   lastEliminated: null,
   winner: null,
   gameId: null,
+  discussionReady: false,
+  awaitingNextDay: false,
 };
 
 const initialVote: VoteState = {
@@ -76,25 +78,44 @@ export const useStore = create<StoreState>((set, get) => ({
         };
       }
 
-      set((s) => ({
-        game: {
-          ...s.game,
-          phase: data.phase ?? s.game.phase,
-          round: data.round != null ? Number(data.round) : s.game.round,
-          roster,
-          playerSlot: data.player_slot != null ? Number(data.player_slot) : s.game.playerSlot,
-          playerRole: data.player_role != null ? String(data.player_role) : s.game.playerRole,
-          partnerName: data.partner_name != null ? String(data.partner_name) : s.game.partnerName,
-          chatLocked: Boolean(data.chat_locked),
-          lastEliminated: data.last_eliminated != null
-            ? asRecord(data.last_eliminated) as GameState["lastEliminated"]
-            : s.game.lastEliminated,
-          winner: data.winner != null ? data.winner as "mafia" | "villager" : s.game.winner,
-          gameId: data.game_id != null ? String(data.game_id) : s.game.gameId,
-        },
-        // Reset vote state on new game state
-        vote: data.phase === "vote" ? { ...initialVote } : s.vote,
-      }));
+      const nextRound = data.round != null ? Number(data.round) : undefined;
+
+      set((s) => {
+        // On a new round, clear the user-gated readiness flags so last
+        // round's button state doesn't bleed into this one.
+        const roundChanged = nextRound != null && nextRound !== s.game.round;
+        return {
+          game: {
+            ...s.game,
+            phase: data.phase ?? s.game.phase,
+            round: nextRound ?? s.game.round,
+            roster,
+            playerSlot: data.player_slot != null ? Number(data.player_slot) : s.game.playerSlot,
+            playerRole: data.player_role != null ? String(data.player_role) : s.game.playerRole,
+            partnerName: data.partner_name != null ? String(data.partner_name) : s.game.partnerName,
+            chatLocked: Boolean(data.chat_locked),
+            lastEliminated: data.last_eliminated != null
+              ? asRecord(data.last_eliminated) as GameState["lastEliminated"]
+              : s.game.lastEliminated,
+            winner: data.winner != null ? data.winner as "mafia" | "villager" : s.game.winner,
+            gameId: data.game_id != null ? String(data.game_id) : s.game.gameId,
+            discussionReady: roundChanged ? false : s.game.discussionReady,
+            awaitingNextDay: roundChanged ? false : s.game.awaitingNextDay,
+          },
+          // Reset vote state on new game state
+          vote: data.phase === "vote" ? { ...initialVote } : s.vote,
+        };
+      });
+      return;
+    }
+
+    if (topic === "game_discussion_ready") {
+      set((s) => ({ game: { ...s.game, discussionReady: true } }));
+      return;
+    }
+
+    if (topic === "game_vote_complete") {
+      set((s) => ({ game: { ...s.game, awaitingNextDay: true } }));
       return;
     }
 

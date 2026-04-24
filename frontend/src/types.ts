@@ -32,6 +32,11 @@ export interface GameState {
   lastEliminated: LastElimination | null;
   winner: "mafia" | "villager" | null;
   gameId: string | null;
+  // User-gated phase transitions. The orchestrator no longer auto-advances;
+  // these flags flip to `true` when the backend signals that the current
+  // phase is ready to end, enabling the corresponding action button.
+  discussionReady: boolean;  // set by day.discussion_ready; enables "End discussion"
+  awaitingNextDay: boolean;  // set by day.vote_complete;   enables "Start next day"
 }
 
 export interface ChatMessage {

@@ -6,6 +6,7 @@ import { VoteBubble } from "./VoteBubble";
 export function VotePanel() {
   const game = useStore((s) => s.game);
   const vote = useStore((s) => s.vote);
+  const awaitingNextDay = useStore((s) => s.game.awaitingNextDay);
   const [selectedSlot, setSelectedSlot] = useState<number | null>(null);
   const [voted, setVoted] = useState(false);
 
@@ -23,6 +24,11 @@ export function VotePanel() {
     if (selectedSlot == null || voted) return;
     useStore.getState().send("game_vote_cast", { vote_for_slot: selectedSlot, round });
     setVoted(true);
+  }
+
+  function startNextDay() {
+    if (!awaitingNextDay) return;
+    useStore.getState().send("game_advance_phase", { round });
   }
 
   // Tally top slot
@@ -172,6 +178,19 @@ export function VotePanel() {
           Vote cast — {roster[selectedSlot!]?.name ?? "—"}. Waiting for others...
         </p>
       )}
+
+      {/* Start next day — only shown during the vote phase. Disabled until
+          the orchestrator signals `day.vote_complete` (reveal + lynch done). */}
+      <Button
+        variant="primary"
+        size="md"
+        disabled={!awaitingNextDay}
+        onClick={startNextDay}
+        aria-label="Start next day"
+        title={!awaitingNextDay ? "Waiting for all votes to come in" : undefined}
+      >
+        Start next day →
+      </Button>
     </div>
   );
 }

@@ -778,6 +778,41 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
         if advance_requested then break end
     end
 
+    -- If all NPCs spoke naturally (no user interruption), DO NOT auto-advance.
+    -- Publish `day.discussion_ready` so the SPA can enable the "End discussion"
+    -- button, then block until the user clicks it. The player can keep typing
+    -- interjections during this wait; only `player.advance_phase` unblocks us.
+    if not advance_requested then
+        pe.publish_event("system", "day.discussion_ready", "/" .. game_id, {
+            round = round,
+        })
+        logger:info("[orchestrator] discussion complete, awaiting user advance",
+            { round = round })
+        while not advance_requested do
+            local r = channel.select({ inbox:case_receive() })
+            if not r.ok then break end
+            local msg = r.value
+            local tp = msg and msg:topic() or ""
+            local raw = (msg and msg:payload() and msg:payload():data()) or {}
+            if tp == "player.advance_phase" then
+                advance_requested = true
+            elseif tp == "player.chat" then
+                -- Commit late interjections — NPCs won't reply any more, but
+                -- the message still belongs in the transcript.
+                local text = tostring(raw.text or "")
+                if text ~= "" then
+                    local _, werr = commit_player_chat(game_id, round,
+                        raw.from_slot or player_slot, text, chat_seq)
+                    if werr then
+                        logger:warn("[orchestrator] commit_player_chat failed",
+                            { err = tostring(werr) })
+                    end
+                end
+            end
+            -- drop all other inbox topics during this wait
+        end
+    end
+
     -- Drain remaining chunks ~500ms so late submit/chunk don't leak into vote phase.
     local drain_end = time.after("500ms")
     while true do
@@ -1489,6 +1524,25 @@ local function run(args)
         -- LOOP-10: win check after the lynch. On tie, state.alive is unchanged so
         -- check_win returns nil again and the loop advances to the next Night.
         winner, living_mafia, living_villagers = check_win(state.alive, state.roles)
+
+        -- If the game continues, DO NOT auto-advance to the next Night. Publish
+        -- `day.vote_complete` so the SPA can enable its "Start next day" button,
+        -- then block until the user clicks it. If there's a winner we fall
+        -- through to the shutdown cascade below without waiting.
+        if not winner then
+            pe.publish_event("system", "day.vote_complete", "/" .. game_id, {
+                round = state.round,
+            })
+            logger:info("[orchestrator] vote round complete, awaiting user advance",
+                { round = state.round })
+            while true do
+                local r = channel.select({ inbox:case_receive() })
+                if not r.ok then break end
+                local msg = r.value
+                if msg and msg:topic() == "player.advance_phase" then break end
+                -- drop everything else
+            end
+        end
     end
 
     if winner then
