@@ -215,6 +215,42 @@ local function run(args)
                     round = tonumber(data.round) or 0,
                 })
 
+            elseif topic == "night_pick" and active then
+                -- LOOP-02 (Mafia-human branch): human Mafia locks the kill target.
+                -- Override from_slot with server-known player_slot (Spoofing T-04-01).
+                -- Clamp target_slot to 1..6 (V5 input validation, mirrors vote_cast clamping).
+                local target = tonumber(data.target_slot)
+                if target and target >= 1 and target <= 6 then
+                    process.send(active.orch_pid, "player.night_pick", {
+                        from_slot = active.player_slot,
+                        target_slot = target,
+                        round = tonumber(data.round) or 0,
+                    })
+                end
+
+            elseif topic == "mafia_chat_send" and active then
+                -- LOOP-03: human Mafia sends a side-chat line. Mirrors chat_send: server overrides
+                -- from_slot, clamps text to MAX_CHAT_CHARS (500). Orchestrator decides scope='mafia'
+                -- when committing — plugin holds no scope state.
+                local text = tostring(data.text or "")
+                if #text > MAX_CHAT_CHARS then text = text:sub(1, MAX_CHAT_CHARS) end
+                if text ~= "" then
+                    process.send(active.orch_pid, "player.mafia_chat", {
+                        text = text,
+                        from_slot = active.player_slot,
+                        round = tonumber(data.round) or 0,
+                    })
+                end
+
+            elseif topic == "begin_day" and active then
+                -- D-NU-02: human clicks "Begin Day →" after night-kill reveal. Reuses the
+                -- existing player.advance_phase orchestrator handler (Plan 04 makes the
+                -- night-side gate listen for the same topic). Dead-player guard does NOT
+                -- apply: dead human can still advance the phase (CLAUDE.md flow invariant).
+                process.send(active.orch_pid, "player.advance_phase", {
+                    round = tonumber(data.round) or 0,
+                })
+
             elseif topic == "start_game" and active then
                 -- User clicked "Start game" on the intro screen. Unblocks the
                 -- orchestrator's intro gate; the FSM enters Night 1.
@@ -249,6 +285,7 @@ local function run(args)
                     ["votes_revealed"]        = "game_votes_revealed",
                     ["day.discussion_ready"]  = "game_discussion_ready",    -- user-gated end of day
                     ["day.vote_complete"]     = "game_vote_complete",       -- user-gated start of next day
+                    ["night.ready_for_day"]   = "game_night_ready_for_day", -- D-NU-02: Begin-Day gate signal
                     ["game.ended"]            = "game_game_ended",
                     ["game_state_changed"]    = "game_state_changed",
                     ["npc_turn_skipped"]      = "game_npc_skipped",  -- diagnostic for UI toast
