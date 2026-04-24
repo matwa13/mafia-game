@@ -449,9 +449,13 @@ end
 
 -- Publish system/game_state_changed on phase transitions (no elimination payload).
 -- Takes explicit fields — avoids wippy-lint struct-shape union issues.
+--
+-- `winner` is only populated for the final phase="ended" emit so the SPA gets
+-- phase and winner in one atomic frame (no race against the separate game.ended
+-- event, which the EndGameBanner would otherwise render before winner lands).
 local function emit_game_state_changed(game_id, alive_map, roles_map,
                                         slot_persona_map, roster_names_map,
-                                        player_sl, phase, round, chat_locked)
+                                        player_sl, phase, round, chat_locked, winner)
     local reveal_all = (phase == "ended")
     local roster = build_gsc_roster(alive_map, roles_map, slot_persona_map,
                                      roster_names_map, player_sl, reveal_all)
@@ -463,6 +467,7 @@ local function emit_game_state_changed(game_id, alive_map, roles_map,
         player_slot = player_sl,
         game_id = game_id,
         chat_locked = chat_locked or false,
+        winner = winner,
     })
 end
 
@@ -1646,7 +1651,7 @@ local function run(args)
 
     if winner then
         emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
-            state.roster_names, player_slot, "ended", state.round, false)
+            state.roster_names, player_slot, "ended", state.round, false, winner)
         shutdown_cascade(game_id, state.round, winner,
             living_mafia, living_villagers, state.npc_pids)
         return { status = "ended", winner = winner, final_round = state.round }
