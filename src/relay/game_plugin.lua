@@ -43,6 +43,7 @@ local function run(args)
     local active = nil              -- { game_id, orch_pid, player_slot } | nil
     local chat_sub, sys_sub = nil, nil
     local chat_ch, sys_ch = nil, nil
+    local mafia_chat_sub, mafia_chat_ch = nil, nil
 
     -- Subscribe eagerly, before we know the game_id. Path filter is "*" so
     -- game_id is irrelevant to the subscription itself; the outer event loop
@@ -68,12 +69,24 @@ local function run(args)
         if sys_sub then sys_sub:close(); sys_sub = nil; sys_ch = nil end
     end
 
+    local function ensure_mafia_subscribed()
+        if mafia_chat_sub then return end
+        mafia_chat_sub = events.subscribe("mafia.mafia", "*")
+        mafia_chat_ch = mafia_chat_sub and mafia_chat_sub:channel() or nil
+        logger:info("[game_plugin] mafia_chat subscribed", { user_id = user_id })
+    end
+
+    local function unsubscribe_mafia()
+        if mafia_chat_sub then mafia_chat_sub:close(); mafia_chat_sub = nil; mafia_chat_ch = nil end
+    end
+
     logger:info("[game_plugin] started", { user_id = user_id })
 
     while true do
         local cases = { inbox:case_receive(), proc_ev:case_receive() }
         if chat_ch then table.insert(cases, chat_ch:case_receive()) end
         if sys_ch then table.insert(cases, sys_ch:case_receive()) end
+        if mafia_chat_ch then table.insert(cases, mafia_chat_ch:case_receive()) end
         local r = channel.select(cases)
         if not r.ok then break end
 
@@ -140,6 +153,12 @@ local function run(args)
                                 orch_pid = orch_pid,
                                 player_slot = started.player_slot or 1,
                             }
+                            -- Phase 4 (LOOP-03): Mafia-human games get a third subscription on mafia.mafia
+                            -- to receive side-chat events. Villager-human games skip this — no extra subscription,
+                            -- no extra channel.select case, no overhead. Strict scope-isolation at the events layer.
+                            if started.player_role == "mafia" then
+                                ensure_mafia_subscribed()
+                            end
                             -- Subscription already active (ensure_subscribed above);
                             -- setting `active` lets the event loop's path filter
                             -- start accepting events for this game_id.
@@ -209,7 +228,9 @@ local function run(args)
                     { topic = tostring(topic) })
             end
 
-        elseif (chat_ch and r.channel == chat_ch) or (sys_ch and r.channel == sys_ch) then
+        elseif (chat_ch and r.channel == chat_ch)
+            or (sys_ch and r.channel == sys_ch)
+            or (mafia_chat_ch and r.channel == mafia_chat_ch) then
             local evt = r.value
             if not evt or not active then
                 -- drop — no active game or nil event
@@ -243,6 +264,7 @@ local function run(args)
                 -- Pitfall 9: on game.ended, drop subscriptions + clear active so next game starts fresh.
                 if kind == "game.ended" then
                     unsubscribe()
+                    unsubscribe_mafia()  -- Phase 4 (SETUP-04): drop mafia_chat sub before next game spawns.
                     active = nil
                     logger:info("[game_plugin] game ended; cleared active state")
                 end
@@ -252,6 +274,7 @@ local function run(args)
             local ev = r.value
             if ev and ev.kind == process.event.CANCEL then
                 unsubscribe()
+                unsubscribe_mafia()
                 logger:info("[game_plugin] CANCEL; exiting")
                 return
             end
@@ -259,6 +282,7 @@ local function run(args)
     end
 
     unsubscribe()
+    unsubscribe_mafia()
 end
 
 return { run = run }
