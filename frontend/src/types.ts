@@ -1,5 +1,6 @@
 export type GamePhase =
   | "starting"
+  | "intro"
   | "night"
   | "day"
   | "vote"
@@ -11,6 +12,8 @@ export interface RosterEntry {
   alive: boolean;
   role?: string;
   archetypeId?: string;
+  archetypeLabel?: string;
+  voiceBlurb?: string;
   personaColor?: string;
 }
 

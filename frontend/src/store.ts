@@ -74,6 +74,8 @@ export const useStore = create<StoreState>((set, get) => ({
           alive: Boolean(rv.alive),
           role: rv.role != null ? String(rv.role) : undefined,
           archetypeId: rv.archetype_id != null ? String(rv.archetype_id) : undefined,
+          archetypeLabel: rv.archetype_label != null ? String(rv.archetype_label) : undefined,
+          voiceBlurb: rv.voice_blurb != null ? String(rv.voice_blurb) : undefined,
           personaColor: rv.persona_color != null ? String(rv.persona_color) : undefined,
         };
       }

@@ -8,6 +8,7 @@ import { VotePanel } from "./components/VotePanel";
 import { LastWordsCard } from "./components/LastWordsCard";
 import { EliminationRibbon } from "./components/EliminationRibbon";
 import { EndGameBanner } from "./components/EndGameBanner";
+import { CharacterIntro } from "./components/CharacterIntro";
 import { Button } from "./components/primitives/Button";
 
 export default function App() {
@@ -27,6 +28,10 @@ export default function App() {
         onStart={(playerName) => send("game_start", { seed: 3, name: playerName })}
       />
     );
+  }
+
+  if (phase === "intro") {
+    return <CharacterIntro onStart={() => send("game_start_game", {})} />;
   }
 
   return (

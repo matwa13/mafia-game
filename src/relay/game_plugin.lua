@@ -44,12 +44,23 @@ local function run(args)
     local chat_sub, sys_sub = nil, nil
     local chat_ch, sys_ch = nil, nil
 
-    local function subscribe_to_game(game_id)
+    -- Subscribe eagerly, before we know the game_id. Path filter is "*" so
+    -- game_id is irrelevant to the subscription itself; the outer event loop
+    -- rejects cross-game events via `evt.path == "/"..active.game_id`.
+    --
+    -- This MUST happen before `process.send(gm_pid, "game.start", ...)`:
+    -- the orchestrator publishes its first `game_state_changed` (phase="intro")
+    -- immediately after readiness, in the same tick as `orchestrator.ready`
+    -- to game_manager. If we subscribe only after receiving `game.started`,
+    -- the intro frame races and is lost — browser gets stuck on the plugin's
+    -- synthetic "starting" frame.
+    local function ensure_subscribed()
+        if chat_sub and sys_sub then return end
         chat_sub = events.subscribe("mafia.public", "*")
         sys_sub = events.subscribe("mafia.system", "*")
         chat_ch = chat_sub and chat_sub:channel() or nil
         sys_ch = sys_sub and sys_sub:channel() or nil
-        logger:info("[game_plugin] subscribed", { user_id = user_id, game_id = game_id })
+        logger:info("[game_plugin] subscribed", { user_id = user_id })
     end
 
     local function unsubscribe()
@@ -91,6 +102,10 @@ local function run(args)
                     if #pname > 32 then pname = pname:sub(1, 32) end
                     if pname == "" then pname = "Player" end
 
+                    -- Subscribe BEFORE sending game.start to close the race
+                    -- with the orchestrator's first game_state_changed emit.
+                    ensure_subscribed()
+
                     process.send(gm_pid, "game.start", {
                         driver_pid = process.pid(),
                         seed = data.seed,
@@ -125,7 +140,9 @@ local function run(args)
                                 orch_pid = orch_pid,
                                 player_slot = started.player_slot or 1,
                             }
-                            subscribe_to_game(started.game_id)
+                            -- Subscription already active (ensure_subscribed above);
+                            -- setting `active` lets the event loop's path filter
+                            -- start accepting events for this game_id.
                             forward(conn_pid, "game_state_changed", {
                                 phase = "starting",
                                 game_id = started.game_id,
@@ -178,6 +195,11 @@ local function run(args)
                 process.send(active.orch_pid, "player.advance_phase", {
                     round = tonumber(data.round) or 0,
                 })
+
+            elseif topic == "start_game" and active then
+                -- User clicked "Start game" on the intro screen. Unblocks the
+                -- orchestrator's intro gate; the FSM enters Night 1.
+                process.send(active.orch_pid, "player.start_game", {})
 
             elseif not active then
                 logger:debug("[game_plugin] command with no active game; ignoring",

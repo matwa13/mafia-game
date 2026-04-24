@@ -9,24 +9,36 @@ export function InterjectionInput() {
   const phase = useStore((s) => s.game.phase);
   const round = useStore((s) => s.game.round);
   const discussionReady = useStore((s) => s.game.discussionReady);
+  const roster = useStore((s) => s.game.roster);
+  const playerSlot = useStore((s) => s.game.playerSlot);
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Eliminated-player guard: once the human is lynched or night-killed,
+  // they can no longer speak in the discussion. Mirrors the VotePanel
+  // pattern that hides vote controls for dead players.
+  const playerEntry = playerSlot != null ? roster[playerSlot] : undefined;
+  const playerDead = playerEntry ? !playerEntry.alive : false;
 
   // Input is only active during day discussion. Night / vote / reveal / ended
   // all suppress sending. This prevents player.chat messages from queuing in
   // the orchestrator's inbox while the orchestrator isn't in the day-
   // discussion loop — which otherwise leak into day 1 as the first bubble.
-  const canSend = phase === "day" && !chatLocked;
+  const canSend = phase === "day" && !chatLocked && !playerDead;
   // "End discussion" is gated separately: stays disabled until the
   // orchestrator signals `day.discussion_ready` (all NPCs have spoken).
-  const canAdvance = canSend && discussionReady;
-  const placeholder = canSend
-    ? "Say something..."
-    : phase === "night"
-      ? "Night — discussion closed."
-      : chatLocked
-        ? "Discussion is locked."
-        : "Waiting...";
+  // Dead players can still advance the phase — their chat is locked but
+  // they should not be stranded if the game waits on their click.
+  const canAdvance = phase === "day" && !chatLocked && discussionReady;
+  const placeholder = playerDead
+    ? "You are eliminated."
+    : canSend
+      ? "Say something..."
+      : phase === "night"
+        ? "Night — discussion closed."
+        : chatLocked
+          ? "Discussion is locked."
+          : "Waiting...";
 
   function handleSend() {
     const trimmed = text.trim().slice(0, MAX_CHARS);
@@ -56,6 +68,38 @@ export function InterjectionInput() {
     const el = e.target;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+  }
+
+  if (playerDead) {
+    return (
+      <div
+        className="flex flex-col gap-2 p-3 border-t"
+        style={{
+          borderColor: "var(--color-border)",
+          background: "var(--color-surface)",
+          position: "sticky",
+          bottom: 0,
+        }}
+      >
+        <p
+          className="text-sm text-center"
+          role="status"
+          style={{ color: "var(--color-text-muted)" }}
+        >
+          You are eliminated. You can no longer participate in the discussion.
+        </p>
+        <Button
+          variant="secondary"
+          size="md"
+          disabled={!canAdvance}
+          onClick={handleAdvance}
+          aria-label="End discussion and go to vote"
+          title={!discussionReady ? "Wait until all NPCs have spoken" : undefined}
+        >
+          End discussion →
+        </Button>
+      </div>
+    );
   }
 
   return (

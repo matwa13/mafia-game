@@ -422,7 +422,27 @@ local function build_gsc_roster(alive_map, roles_map, slot_persona_map,
         if not is_alive or reveal_all then
             revealed_role = roles_map[slot]
         end
-        roster[tostring(slot)] = { name = name, alive = is_alive, role = revealed_role }
+        -- Persona fields for NPC slots. Player slot has no persona (nil).
+        -- voice_blurb is the first canonical utterance — a sample line of
+        -- in-character dialogue for the "meet the cast" intro screen.
+        local archetype_id, archetype_label, voice_blurb = nil, nil, nil
+        local sp = slot_persona_map and slot_persona_map[slot]
+        if sp then
+            archetype_id = sp.archetype_id
+            archetype_label = sp.archetype_label
+            local utts = sp.canonical_utterances
+            if type(utts) == "table" and utts[1] then
+                voice_blurb = utts[1]
+            end
+        end
+        roster[tostring(slot)] = {
+            name = name,
+            alive = is_alive,
+            role = revealed_role,
+            archetype_id = archetype_id,
+            archetype_label = archetype_label,
+            voice_blurb = voice_blurb,
+        }
     end
     return roster
 end
@@ -705,18 +725,27 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                     local raw = (msg and msg:payload() and msg:payload():data()) or {}
 
                     if tp == "chat.submit" and raw.from_slot == slot and raw.round == round then
-                        local kind = raw.kind or "npc"
-                        -- Use the reserved seq so this NPC lands at its
-                        -- pre-allocated slot regardless of intervening user
-                        -- interjections (which took higher seqs).
-                        local _, werr = commit_chat_line(game_id, round, slot,
-                            tostring(raw.text or ""), chat_seq, kind, reserved_seq)
-                        if werr then
-                            logger:error("[orchestrator] commit_chat_line failed",
-                                { slot = slot, err = tostring(werr) })
+                        -- Dead-NPC guard: if alive[slot] flipped false between
+                        -- day.turn dispatch and reply (shouldn't happen during
+                        -- day — belt and suspenders), drop the submit.
+                        if not alive[slot] then
+                            logger:warn("[orchestrator] dropping chat.submit from dead slot",
+                                { slot = slot, round = round })
+                            done_this_msg = true
+                        else
+                            local kind = raw.kind or "npc"
+                            -- Use the reserved seq so this NPC lands at its
+                            -- pre-allocated slot regardless of intervening user
+                            -- interjections (which took higher seqs).
+                            local _, werr = commit_chat_line(game_id, round, slot,
+                                tostring(raw.text or ""), chat_seq, kind, reserved_seq)
+                            if werr then
+                                logger:error("[orchestrator] commit_chat_line failed",
+                                    { slot = slot, err = tostring(werr) })
+                            end
+                            turn_committed = true
+                            done_this_msg = true
                         end
-                        turn_committed = true
-                        done_this_msg = true
 
                     elseif tp == "chat.decline" and raw.from_slot == slot and raw.round == round then
                         logger:info("[orchestrator] chat.decline", {
@@ -726,18 +755,25 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
 
                     elseif tp == "player.chat" then
                         local text = tostring(raw.text or "")
-                        if text ~= "" then
+                        local from = raw.from_slot or player_slot
+                        -- Dead-player guard: eliminated humans cannot chat.
+                        -- Frontend already hides the input; this is backend
+                        -- defense-in-depth against spoofed/stale frames.
+                        if text ~= "" and alive[from] then
                             -- Commit immediately. User gets the next auto-
                             -- incremented seq (which is > reserved_seq), so
                             -- the SPA's seq-sorted render puts the user's
                             -- bubble BELOW this NPC's (still-pending) bubble.
                             local _, werr = commit_player_chat(game_id, round,
-                                raw.from_slot or player_slot, text, chat_seq)
+                                from, text, chat_seq)
                             if werr then
                                 logger:warn("[orchestrator] commit_player_chat failed",
                                     { err = tostring(werr) })
                             end
                             -- Do NOT abort the NPC turn — let it finish.
+                        elseif text ~= "" then
+                            logger:info("[orchestrator] dropping player.chat from dead slot",
+                                { from_slot = from, round = round })
                         end
 
                     elseif tp == "player.advance_phase" then
@@ -745,11 +781,20 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                         -- NPC turn and flag both loops to exit. We exit this
                         -- inner while via done_this_msg = true; the outer
                         -- loops exit via the advance_requested checks.
-                        logger:info("[orchestrator] player.advance_phase received",
-                            { slot = slot, msg_index = msg_index })
-                        advance_requested = true
-                        process.send(npc_pid, "abort.turn", {})
-                        done_this_msg = true
+                        --
+                        -- Round match: a stale advance_phase from a previous
+                        -- round's gate (e.g. the user double-clicked Start
+                        -- Next Day before the client rerendered) must NOT
+                        -- cut this round's discussion short — that would be
+                        -- auto-advance.
+                        local adv_round = tonumber(raw.round)
+                        if adv_round == round then
+                            logger:info("[orchestrator] player.advance_phase received",
+                                { slot = slot, msg_index = msg_index })
+                            advance_requested = true
+                            process.send(npc_pid, "abort.turn", {})
+                            done_this_msg = true
+                        end
 
                     end
                     -- Ignore other topics during day turn.
@@ -795,18 +840,28 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
             local tp = msg and msg:topic() or ""
             local raw = (msg and msg:payload() and msg:payload():data()) or {}
             if tp == "player.advance_phase" then
-                advance_requested = true
+                -- Round match: cross-round stale advance_phase must not
+                -- slip through this gate either.
+                local adv_round = tonumber(raw.round)
+                if adv_round == round then
+                    advance_requested = true
+                end
             elseif tp == "player.chat" then
                 -- Commit late interjections — NPCs won't reply any more, but
-                -- the message still belongs in the transcript.
+                -- the message still belongs in the transcript. Dead-player
+                -- guard: skip if the sender has been eliminated.
                 local text = tostring(raw.text or "")
-                if text ~= "" then
+                local from = raw.from_slot or player_slot
+                if text ~= "" and alive[from] then
                     local _, werr = commit_player_chat(game_id, round,
-                        raw.from_slot or player_slot, text, chat_seq)
+                        from, text, chat_seq)
                     if werr then
                         logger:warn("[orchestrator] commit_player_chat failed",
                             { err = tostring(werr) })
                     end
+                elseif text ~= "" then
+                    logger:info("[orchestrator] dropping late player.chat from dead slot",
+                        { from_slot = from, round = round })
                 end
             end
             -- drop all other inbox topics during this wait
@@ -1148,7 +1203,9 @@ local function run_vote_round_llm(game_id, round, alive, roles, player_slot, npc
     end
     local top_slot, top_count, tied = nil, 0, false
     for s, c in pairs(tally) do
-        if c > top_count then top_slot = tonumber(s); top_count = c; tied = false
+        -- Keys are stringified (line ~1186); coerce back to integer so lint
+        -- accepts `top_slot` as an index into integer-keyed maps (npc_pids, alive).
+        if c > top_count then top_slot = math.floor(tonumber(s) or 0); top_count = c; tied = false
         elseif c == top_count then tied = true end
     end
     if force_tie then tied = true; top_slot = nil end
@@ -1440,9 +1497,24 @@ local function run(args)
         partner_slot = partner_slot,  -- nil unless mafia (ROLE-03/ROLE-04)
     })
 
-    -- Emit initial game_state_changed before the first night.
+    -- Intro gate: emit phase="intro" with full roster and block until the
+    -- player explicitly starts the game. No night kill, no LLM calls, no
+    -- chat until the gate exits via player.start_game.
     emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
-        state.roster_names, player_slot, "night", 0, false)
+        state.roster_names, player_slot, "intro", 0, false)
+
+    logger:info("[orchestrator] intro gate: waiting for player.start_game",
+        { game_id = game_id })
+    while true do
+        local r = channel.select({ inbox:case_receive() })
+        if not r.ok then
+            logger:warn("[orchestrator] inbox closed during intro gate")
+            break
+        end
+        local msg = r.value
+        if msg and msg:topic() == "player.start_game" then break end
+        -- Drop every other topic (stale chat/vote, unknown commands).
+    end
 
     -- 8. Post-INIT FSM loop (Plan 04).
     --    Night -> check_win -> Day -> Vote -> check_win -> loop | shutdown.
@@ -1474,7 +1546,9 @@ local function run(args)
         local night_victim_slot = night_result
         if type(night_victim_slot) == "number" and state.roster_names then
             local vname = state.roster_names[night_victim_slot] or ("slot-" .. night_victim_slot)
-            local vrole = state.roles and state.roles[night_victim_slot] or nil
+            -- Night victims are always villagers (see pick_night_victim); the
+            -- fallback satisfies the non-nil string contract of emit_game_state_changed_elim.
+            local vrole = (state.roles and state.roles[night_victim_slot]) or "villager"
             emit_game_state_changed_elim(game_id, state.alive, state.roles, state.slot_persona,
                 state.roster_names, player_slot, "day", state.round,
                 night_victim_slot, vname, vrole, "night",
@@ -1529,7 +1603,26 @@ local function run(args)
         -- `day.vote_complete` so the SPA can enable its "Start next day" button,
         -- then block until the user clicks it. If there's a winner we fall
         -- through to the shutdown cascade below without waiting.
+        --
+        -- User-gated for alive AND dead players: a dead human still sees the
+        -- reveal and must click "Start next day" like anyone else. The gate
+        -- below does not look at `alive[player_slot]`.
         if not winner then
+            -- Drain any in-flight messages before opening the gate. Without
+            -- this a stale `player.advance_phase` (e.g. a rapid double-click
+            -- on End-Discussion, silently dropped while run_vote_round_llm
+            -- was collecting votes) can land in the inbox during the
+            -- persist/tally/publish window and get consumed immediately by
+            -- the await below — auto-advancing to the next night with no
+            -- user action. Most visible when the human is dead because the
+            -- vote round finishes fast (no wait for the human's vote).
+            local pre_gate_drain = time.after("50ms")
+            while true do
+                local r = channel.select({ inbox:case_receive(), pre_gate_drain:case_receive() })
+                if not r.ok or r.channel == pre_gate_drain then break end
+                -- discard every pre-gate message
+            end
+
             pe.publish_event("system", "day.vote_complete", "/" .. game_id, {
                 round = state.round,
             })
@@ -1539,7 +1632,13 @@ local function run(args)
                 local r = channel.select({ inbox:case_receive() })
                 if not r.ok then break end
                 local msg = r.value
-                if msg and msg:topic() == "player.advance_phase" then break end
+                if msg and msg:topic() == "player.advance_phase" then
+                    -- Round match: discard any cross-round stale message
+                    -- that slipped past the drain (e.g. a second click
+                    -- queued during the previous round's gate).
+                    local raw = (msg:payload() and msg:payload():data()) or {}
+                    if tonumber(raw.round) == state.round then break end
+                end
                 -- drop everything else
             end
         end
