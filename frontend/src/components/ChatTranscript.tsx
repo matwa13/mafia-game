@@ -1,0 +1,140 @@
+import { useLayoutEffect, useMemo, useRef } from "react";
+import { useStore } from "../store";
+import { ChatBubble } from "./ChatBubble";
+import { SystemMessage } from "./SystemMessage";
+
+export function ChatTranscript() {
+  const messages = useStore((s) => s.chat.messages);
+  const typing = useStore((s) => s.chat.typing);
+  const roster = useStore((s) => s.game.roster);
+  const playerSlot = useStore((s) => s.game.playerSlot);
+
+  // Unified render list: committed messages + live "is typing..." bubbles,
+  // both sorted by (round, seq). Orchestrator reserves a seq for each NPC
+  // turn at the moment the turn starts and stamps it on the typing.started
+  // event, so the typing bubble renders at the NPC's eventual committed
+  // slot — no visual jump when the message finally lands.
+  //
+  // A user interjection during an NPC turn commits at a higher seq than the
+  // in-flight NPC, so the typing bubble stays above the user's interjection
+  // and is replaced in-place when the chat.line arrives.
+  //
+  // Defensive orphan-typing guard: if a committed message already exists for
+  // (round, slot, seq) or (round, slot) + kind "npc", skip the typing entry
+  // at render time. This protects against edge cases where typing.ended /
+  // chat.line never deleted the entry in the store.
+  type RenderItem =
+    | { kind: "committed"; round: number; seq?: number; msg: (typeof messages)[number]; id: string }
+    | { kind: "typing"; round: number; seq: number; typingKey: string; fromSlot: number };
+
+  const renderItems = useMemo<RenderItem[]>(() => {
+    const committedKeys = new Set<string>();
+    const committedSlotRounds = new Set<string>();
+    messages.forEach((m) => {
+      if (m.seq != null) committedKeys.add(`${m.round}:${m.fromSlot}:${m.seq}`);
+      if (m.kind === "npc") committedSlotRounds.add(`${m.round}:${m.fromSlot}`);
+    });
+
+    const items: RenderItem[] = [];
+    messages.forEach((msg, i) => {
+      items.push({
+        kind: "committed",
+        round: msg.round,
+        seq: msg.seq,
+        msg,
+        id: `m-${i}-${msg.seq ?? "x"}`,
+      });
+    });
+    Object.entries(typing).forEach(([typingKey, entry]) => {
+      const exactKey = `${entry.round}:${entry.fromSlot}:${entry.seq}`;
+      if (committedKeys.has(exactKey)) return;
+      const slotRoundKey = `${entry.round}:${entry.fromSlot}`;
+      if (committedSlotRounds.has(slotRoundKey)) return;
+      items.push({
+        kind: "typing",
+        round: entry.round,
+        seq: entry.seq,
+        typingKey,
+        fromSlot: entry.fromSlot,
+      });
+    });
+    items.sort((a, b) => {
+      if (a.round !== b.round) return a.round - b.round;
+      if (a.seq != null && b.seq != null) return a.seq - b.seq;
+      return 0;
+    });
+    return items;
+  }, [messages, typing]);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const bottomSentinelRef = useRef<HTMLDivElement>(null);
+
+  // Always scroll to bottom when renderItems changes (new message committed
+  // OR streaming text appended). Previous "stuck to bottom" gate was fragile
+  // — the onScroll listener fired during programmatic scrollIntoView, saw a
+  // transient distanceFromBottom > threshold, and flipped the stuck flag off,
+  // permanently disabling subsequent auto-scrolls. For this single-player
+  // chat UX, always-scroll is the simpler and more reliable default.
+  // useLayoutEffect runs synchronously after DOM mutations and before paint,
+  // so the scroll happens before the browser draws the new frame.
+  useLayoutEffect(() => {
+    bottomSentinelRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+  }, [renderItems]);
+
+  return (
+    <div
+      ref={scrollRef}
+      role="log"
+      aria-live="polite"
+      aria-atomic="false"
+      className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-4 p-4"
+      style={{ maxWidth: 720, margin: "0 auto", width: "100%" }}
+    >
+      {renderItems.map((item) => {
+        if (item.kind === "committed") {
+          const msg = item.msg;
+          const entry = roster[msg.fromSlot];
+          const isHuman = msg.fromSlot === playerSlot || msg.kind === "human";
+          const isDead = entry ? !entry.alive : false;
+
+          if (msg.kind === "system") {
+            return <SystemMessage key={item.id} text={msg.text} />;
+          }
+
+          return (
+            <ChatBubble
+              key={item.id}
+              speaker={{
+                name: msg.fromName,
+                personaColor: entry?.personaColor,
+                isHuman,
+                isDead,
+              }}
+              content={msg.text}
+              isInterjection={msg.kind === "human" && msg.fromSlot === playerSlot}
+              isLastWords={msg.kind === "last_words"}
+            />
+          );
+        }
+
+        // "is typing..." bubble — renders at the NPC's reserved seq slot.
+        const rosterEntry = roster[item.fromSlot];
+        const isHuman = item.fromSlot === playerSlot;
+        return (
+          <ChatBubble
+            key={`typing-${item.typingKey}`}
+            speaker={{
+              name: rosterEntry?.name ?? String(item.fromSlot),
+              personaColor: rosterEntry?.personaColor,
+              isHuman,
+            }}
+            content=""
+            isTyping
+          />
+        );
+      })}
+      {/* Bottom sentinel — scrollIntoView target for auto-scroll. */}
+      <div ref={bottomSentinelRef} aria-hidden="true" />
+    </div>
+  );
+}

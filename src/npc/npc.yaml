@@ -1,0 +1,22 @@
+version: "1.0"
+namespace: app.npc
+
+entries:
+  - name: npc
+    kind: process.lua
+    source: file://npc.lua
+    modules:
+      - logger
+      - events
+      - time
+      - sql
+      - json
+      - hash
+    imports:
+      llm: wippy.llm:llm
+      prompt: wippy.llm:prompt
+      pe: app.lib:events
+      persona: app.npc:persona
+      visible_context: app.npc:visible_context
+    method: run
+    # NO process.service — orchestrator spawns per game via process.spawn_linked_monitored.

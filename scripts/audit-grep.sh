@@ -41,6 +41,35 @@ if [ -n "$d15_violations" ]; then
     fail=1
 fi
 
+# --- AP4 (Phase 3): llm.generate / llm.structured_output only in src/npc/ ---
+# Rationale: PROJECT.md + CLAUDE.md non-negotiable — "Synchronous LLM call on
+# orchestrator main loop" is AP4. LLM work happens in NPC processes only.
+ap4_violations=$(grep -rn --include='*.lua' 'llm\.\(generate\|structured_output\)' src/ \
+    | grep -v '^src/npc/' \
+    | grep -v ':src/npc/' \
+    || true)
+if [ -n "$ap4_violations" ]; then
+    echo "AP4 violation: llm.generate / llm.structured_output must only appear in src/npc/"
+    echo "$ap4_violations"
+    fail=1
+fi
+
+# --- AP2 (Phase 3): src/relay/game_plugin.lua holds no game state ---
+# Rationale: UX-01 + PROJECT.md non-negotiable — relay plugin stores ONLY
+# {user_id → conn_pid, user_id → active_game_id}. No sql, no pe, no
+# publish_event, no game-state imports.
+# Guard: game_plugin.lua is created by Plan 04; skip if not yet present.
+if [ -f src/relay/game_plugin.lua ]; then
+    ap2_violations=$(grep -nE 'require\("sql"\)|require\("pe"\)|require\("lib/events"\)|publish_event' \
+        src/relay/game_plugin.lua \
+        || true)
+    if [ -n "$ap2_violations" ]; then
+        echo "AP2 violation: src/relay/game_plugin.lua must not import sql / pe or publish events"
+        echo "$ap2_violations"
+        fail=1
+    fi
+fi
+
 if [ "$fail" -ne 0 ]; then
     exit 1
 fi

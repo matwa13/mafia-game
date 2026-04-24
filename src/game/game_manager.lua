@@ -131,7 +131,7 @@ local function insert_game_row(game_id, rng_seed, player_slot)
 end
 
 -- Spawn one orchestrator per game.start.
-local function spawn_orchestrator(game_id, rng_seed, player_slot, force_tie, driver_pid)
+local function spawn_orchestrator(game_id, rng_seed, player_slot, force_tie, driver_pid, player_name)
     local pid, err = process.spawn_linked_monitored("app.game:orchestrator", "app.processes:host", {
         game_id = game_id,
         rng_seed = rng_seed,
@@ -139,6 +139,7 @@ local function spawn_orchestrator(game_id, rng_seed, player_slot, force_tie, dri
         force_tie = force_tie,
         driver_pid = driver_pid,
         gm_pid = process.pid(),
+        player_name = player_name,
     })
     return pid, err
 end
@@ -149,6 +150,7 @@ local function handle_game_start(state, payload)
     local player_slot = payload.player_slot or 1
     local force_tie = payload.force_tie == true
     local driver_pid = payload.driver_pid
+    local player_name = payload.player_name  -- may be nil; orchestrator defaults
 
     if type(driver_pid) ~= "string" then
         logger:error("[game_manager] game.start missing driver_pid")
@@ -166,7 +168,7 @@ local function handle_game_start(state, payload)
     end
 
     local orch_pid, spawn_err = spawn_orchestrator(
-        game_id, rng_seed, player_slot, force_tie, driver_pid)
+        game_id, rng_seed, player_slot, force_tie, driver_pid, player_name)
     if not orch_pid then
         logger:error("[game_manager] orchestrator spawn failed",
             { game_id = game_id, err = tostring(spawn_err) })

@@ -14,4 +14,7 @@ entries:
       - env
     imports:
       pe: app.lib:events
+      sampler: app.npc:sampler
+      persona_pool: app.npc:persona_pool
+      persona: app.npc:persona
     method: run
