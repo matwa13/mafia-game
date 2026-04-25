@@ -1791,6 +1791,29 @@ local function shutdown_cascade(game_id, round, winner, living_mafia, living_vil
     })
 end
 
+-- Phase 4 / D-SCH-02 (closes WR-06): record every phase visit in the rounds table.
+-- Schema (0001_initial_schema.lua:35-41): (game_id, round, phase, started_at)
+-- with PRIMARY KEY (game_id, round) — only the FIRST phase visit per round is
+-- written; subsequent visits are no-ops via INSERT OR IGNORE. WR-06's success
+-- criterion ("rounds table is written at least once per round") is met either way.
+local function record_round_phase(game_id, round, phase)
+    local db, db_err = sql.get("app:db")
+    if db_err or not db then
+        logger:warn("[orchestrator] record_round_phase: sql.get failed",
+            { err = tostring(db_err) })
+        return
+    end
+    local _, exec_err = db:execute(
+        "INSERT OR IGNORE INTO rounds (game_id, round, phase, started_at) VALUES (?, ?, ?, ?)",
+        { game_id, round, phase, time.now():unix() }
+    )
+    db:release()
+    if exec_err then
+        logger:warn("[orchestrator] record_round_phase: insert failed",
+            { round = round, phase = phase, err = tostring(exec_err) })
+    end
+end
+
 local function run(args)
     args = args or {}
     local game_id = args.game_id
@@ -1959,20 +1982,76 @@ local function run(args)
     while not winner do
         state.round = (state.round or 0) + 1
 
+        -- D-SCH-02 / WR-06: record phase visit. PK is (game_id, round); only the
+        -- first phase per round actually writes — that's still enough to close WR-06.
+        record_round_phase(game_id, state.round, "night")
+
         emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
             state.roster_names, player_slot, "night", state.round, false)
 
-        local ok_night, night_result = run_night_stub(
-            game_id, state.round, rng_seed, state.alive, state.roles, state.npc_pids)
+        -- Phase 4 LOOP-02: branch on player role at night.
+        -- Stub path (used by test_driver V-02-XX harness): keep run_night_stub.
+        -- Real-LLM path: villager → run_night_villager_auto, mafia → run_night_mafia_human.
+        local ok_night, night_result
+        if npc_mode() == "real" then
+            if state.roles[player_slot] == "villager" then
+                ok_night, night_result = run_night_villager_auto(
+                    game_id, state.round, state.alive, state.roles, state.npc_pids,
+                    state.roster_names)
+            else
+                ok_night, night_result = run_night_mafia_human(
+                    game_id, state.round, state.alive, state.roles, player_slot,
+                    state.npc_pids, state.chat_seq, inbox, state.roster_names)
+            end
+        else
+            ok_night, night_result = run_night_stub(
+                game_id, state.round, rng_seed, state.alive, state.roles, state.npc_pids)
+        end
         if not ok_night then
-            logger:error("[orchestrator] run_night_stub failed",
-                { err = tostring(night_result) })
+            logger:error("[orchestrator] night helper failed",
+                { mode = npc_mode(), err = tostring(night_result) })
             break
+        end
+
+        -- D-NU-03: 3s min-dwell so the player feels the night pass even if the
+        -- LLM/picker returned fast. Drain inbox during the dwell window
+        -- (same pattern as run_day_discussion's 500ms drain).
+        local night_dwell = time.after("3s")
+        while true do
+            local r = channel.select({ inbox:case_receive(), night_dwell:case_receive() })
+            if not r.ok or r.channel == night_dwell then break end
+            -- discard messages during dwell
+        end
+
+        -- D-NU-02: explicit Begin-Day gate — orchestrator publishes night.ready_for_day,
+        -- waits for player.advance_phase. Verbatim mirror of the post-vote gate below.
+        local pre_gate_drain = time.after("50ms")
+        while true do
+            local r = channel.select({ inbox:case_receive(), pre_gate_drain:case_receive() })
+            if not r.ok or r.channel == pre_gate_drain then break end
+        end
+
+        pe.publish_event("system", "night.ready_for_day", "/" .. game_id, {
+            round = state.round,
+        })
+        logger:info("[orchestrator] night resolved, awaiting begin-day",
+            { round = state.round })
+        while true do
+            local r = channel.select({ inbox:case_receive() })
+            if not r.ok then break end
+            local msg = r.value
+            if msg and msg:topic() == "player.advance_phase" then
+                local raw = (msg:payload() and msg:payload():data()) or {}
+                if tonumber(raw.round) == state.round then break end
+            end
         end
 
         -- LOOP-10: win check after the night elimination.
         winner, living_mafia, living_villagers = check_win(state.alive, state.roles)
         if winner then break end
+
+        -- D-SCH-02: record day phase visit (no-op due to PK if night already wrote).
+        record_round_phase(game_id, state.round, "day")
 
         -- Emit game_state_changed WITH last_eliminated so the SPA can name the
         -- victim ("ALICE WAS ELIMINATED"). Without this, the store falls back
@@ -2009,6 +2088,9 @@ local function run(args)
                 { err = tostring(day_err) })
             break
         end
+
+        -- D-SCH-02: record vote phase visit (no-op due to PK if earlier phase wrote).
+        record_round_phase(game_id, state.round, "vote")
 
         emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
             state.roster_names, player_slot, "vote", state.round, false)
