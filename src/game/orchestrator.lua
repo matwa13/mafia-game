@@ -893,6 +893,13 @@ local function emit_game_state_changed(game_id, alive_map, roles_map,
     local partner_slot = player_role == "mafia" and compute_partner_slot(roles_map, player_sl)
     local partner_name = partner_slot and slot_persona_map and
         slot_persona_map[partner_slot] and slot_persona_map[partner_slot].name
+    -- Stamp partner's role onto their roster entry so the Mafia-human SPA can
+    -- derive partnerAlive via roster scan (NightPicker.tsx:31). build_gsc_roster
+    -- only reveals role for dead slots; alive partners need explicit stamping.
+    -- Safe: partner_slot is non-nil only when player_role == "mafia" (D-09).
+    if partner_slot and roster[tostring(partner_slot)] then
+        roster[tostring(partner_slot)].role = roles_map[partner_slot]
+    end
     pe.publish_event("system", "game_state_changed", "/" .. game_id, {
         phase = phase or "unknown",
         round = round or 0,
