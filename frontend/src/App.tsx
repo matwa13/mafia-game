@@ -129,10 +129,10 @@ function SetupScreen({ onStart }: { onStart: (name: string) => void }) {
             Start new game
           </Button>
         </div>
-        <div className="text-sm text-left space-y-1" style={{ color: "var(--color-text-muted)" }}>
-          <p>• 2 Mafia and 4 Villagers (you are one of 6)</p>
-          <p>• Night: Mafia picks a target. Day: town votes.</p>
-          <p>• Majority wins when the other side is out.</p>
+        <div className="text-sm space-y-1" style={{ color: "var(--color-text-muted)" }}>
+          <p>2 Mafia and 4 Villagers (you are one of 6)</p>
+          <p>Night: Mafia picks a target. Day: town votes.</p>
+          <p>Majority wins when the other side is out.</p>
         </div>
       </div>
     </div>
