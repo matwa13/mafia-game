@@ -16,6 +16,16 @@
 # that reference the literal strings do not register as false-positive
 # violations. The invariants are about Lua source-code behavior.
 
+# Phase 4 invariants confirmed (2026-04-25):
+# - commit_chat_line takes a scope parameter; D-15 grep regex still matches publish-call
+#   regardless of scope value. mafia_chat publishes go through the SOLE writer.
+# - Plugin (game_plugin.lua) gained a conditional mafia.mafia subscription;
+#   AP2 (no sql/pe/publish_event) holds.
+# - NPC (npc.lua) gained run_night_pick + run_night_side_chat; AP4 (llm.* only in
+#   src/npc/) holds.
+# - Orchestrator gained run_night_villager_auto + run_night_mafia_human; D-09
+#   (events.send only in src/lib/events.lua + src/probes/probe.lua) holds.
+
 set -euo pipefail
 
 fail=0
