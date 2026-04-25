@@ -301,6 +301,212 @@ local function run_night_stub(game_id, round, rng_seed, alive, roles, npc_pids)
     return true, victim_slot
 end
 
+-- Phase 4 LOOP-02 (Villager branch): Both Mafia NPCs pick in parallel via
+-- structured_output. Orchestrator gathers replies with deadline, tie-breaks on
+-- confidence (higher wins) then on lower slot, writes atomic SQL tx
+-- (night_actions with reasoning_json, eliminations, players.alive=0), and
+-- publishes night.resolved (system scope).
+--
+-- D-15 invariant unchanged: this helper does NOT publish "chat.line" — only
+-- night.resolved. The mafia-human branch is the chat-line site.
+--
+-- Returns: true, victim_slot on success; nil, err_str on failure.
+local function run_night_villager_auto(game_id, round, alive, roles, npc_pids, roster_names)
+    -- 1. Find living Mafia NPCs (potential pickers).
+    local mafia_pickers = {}
+    for slot = 1, 6 do
+        if alive[slot] and roles[slot] == "mafia" and npc_pids[slot] then
+            table.insert(mafia_pickers, slot)
+        end
+    end
+    if #mafia_pickers == 0 then
+        return nil, "no living mafia NPCs (game should have ended)"
+    end
+
+    -- 2. Build living non-Mafia target list (slots + names).
+    local living_target_slots = {}
+    local living_target_names = {}
+    for slot = 1, 6 do
+        if alive[slot] and roles[slot] ~= "mafia" then
+            table.insert(living_target_slots, slot)
+            table.insert(living_target_names,
+                (roster_names and roster_names[slot]) or ("slot-" .. slot))
+        end
+    end
+    if #living_target_slots == 0 then
+        return nil, "no living villagers (game should have ended)"
+    end
+
+    -- 3. Dispatch night.pick to every living Mafia NPC. Replies arrive on inbox.
+    for _, mslot in ipairs(mafia_pickers) do
+        process.send(npc_pids[mslot], "night.pick", {
+            round = round,
+            living_target_slots = living_target_slots,
+            living_target_names = living_target_names,
+        })
+    end
+
+    -- 4. Gather replies with hard deadline (slightly longer than NPC's VOTE_CAP_S
+    --    to absorb network jitter).
+    local inbox = process.inbox()
+    local deadline = time.after("18s")
+    local picks = {}  -- {[mafia_slot] = { target_slot, reasoning, confidence }}
+    local got = 0
+    local need = #mafia_pickers
+
+    while got < need do
+        local r = channel.select({ inbox:case_receive(), deadline:case_receive() })
+        if not r.ok then break end
+        if r.channel == deadline then break end
+        local msg = r.value
+        local tp = msg and msg:topic() or ""
+        if tp == "night.pick.response" then
+            local raw = (msg:payload() and msg:payload():data()) or {}
+            local from_slot = tonumber(raw.from_slot)
+            local resp_round = tonumber(raw.round)
+            -- Round-match guard (T-04-18): drop stale cross-round responses.
+            if from_slot and roles[from_slot] == "mafia" and not picks[from_slot]
+                and (resp_round == nil or resp_round == round) then
+                picks[from_slot] = {
+                    target_slot = tonumber(raw.target_slot),
+                    reasoning = tostring(raw.reasoning or ""),
+                    confidence = tonumber(raw.confidence) or 0,
+                }
+                got = got + 1
+            end
+        end
+        -- ignore everything else during gather (player commands, stale events)
+    end
+
+    -- 5. Tie-break: higher confidence wins; on tie, lower mafia slot wins.
+    local winning_actor_slot, winning_target_slot = nil, nil
+    local winning_conf = -1
+    local winning_reason = ""
+    local tie_break_note = ""
+    -- Build candidates (only mafia slots that responded with a target).
+    local candidates = {}
+    for _, mslot in ipairs(mafia_pickers) do
+        if picks[mslot] and picks[mslot].target_slot then
+            table.insert(candidates, { slot = mslot, pick = picks[mslot] })
+        end
+    end
+
+    if #candidates == 0 then
+        -- All NPCs failed/timed-out: fall back to the lowest-mafia-slot picking
+        -- the first living non-Mafia. Better than crashing the FSM.
+        winning_actor_slot = mafia_pickers[1]
+        winning_target_slot = living_target_slots[1]
+        winning_reason = "all_mafia_npcs_failed_fallback"
+        winning_conf = 0
+        tie_break_note = "fallback: zero responses"
+    else
+        for _, c in ipairs(candidates) do
+            local p = c.pick
+            local higher_conf = p.confidence > winning_conf
+            local equal_conf_lower_slot = (p.confidence == winning_conf)
+                and (winning_actor_slot == nil or c.slot < winning_actor_slot)
+            if higher_conf or equal_conf_lower_slot then
+                winning_actor_slot = c.slot
+                winning_target_slot = p.target_slot
+                winning_conf = p.confidence
+                winning_reason = p.reasoning
+            end
+        end
+        -- Compose tie-break note for reasoning_json: list all candidates' picks.
+        local notes = {}
+        for _, c in ipairs(candidates) do
+            table.insert(notes, string.format(
+                "NPC-%d picked slot %s confidence %d: %s",
+                c.slot, tostring(c.pick.target_slot), c.pick.confidence, c.pick.reasoning))
+        end
+        tie_break_note = table.concat(notes, " | ")
+            .. " | winner: NPC-" .. tostring(winning_actor_slot)
+    end
+
+    -- 6. Build reasoning_json (D-VR-03: persisted; not shown in-play).
+    local json_ok, json_mod = pcall(require, "json")
+    local reasoning_json
+    if json_ok and json_mod and json_mod.encode then
+        reasoning_json = json_mod.encode({
+            picks = picks,
+            winner_actor_slot = winning_actor_slot,
+            winner_target_slot = winning_target_slot,
+            winner_confidence = winning_conf,
+            winner_reasoning = winning_reason,
+            tie_break = tie_break_note,
+            source = "villager_auto",
+        })
+    else
+        reasoning_json = string.format(
+            "{\"source\":\"villager_auto\",\"winner_actor_slot\":%d,\"winner_target_slot\":%s,\"winner_confidence\":%d,\"tie_break\":%q}",
+            winning_actor_slot, tostring(winning_target_slot), winning_conf, tie_break_note)
+    end
+
+    -- 7. Atomic SQL transaction: night_actions + eliminations + players.UPDATE.
+    --    Same shape as run_night_stub, plus reasoning_json column.
+    local revealed_role = roles[winning_target_slot]
+    local db, db_err = sql.get("app:db")
+    if db_err or not db then
+        return nil, "sql.get: " .. tostring(db_err)
+    end
+    local tx, tx_err = db:begin()
+    if tx_err then
+        db:release()
+        return nil, "begin: " .. tostring(tx_err)
+    end
+    local now_ts = time.now():unix()
+    local ok, err = pcall(function()
+        local _, e1 = tx:execute(
+            "INSERT INTO night_actions (game_id, round, actor_slot, target_slot, created_at, reasoning_json) VALUES (?, ?, ?, ?, ?, ?)",
+            { game_id, round, winning_actor_slot, winning_target_slot, now_ts, reasoning_json }
+        )
+        assert(not e1, "night_actions.insert: " .. tostring(e1))
+        local _, e2 = tx:execute(
+            "INSERT INTO eliminations (game_id, round, victim_slot, cause, revealed_role, created_at) VALUES (?, ?, ?, 'night', ?, ?)",
+            { game_id, round, winning_target_slot, revealed_role, now_ts }
+        )
+        assert(not e2, "eliminations.insert: " .. tostring(e2))
+        local _, e3 = tx:execute(
+            "UPDATE players SET alive = 0, died_round = ?, died_cause = 'night' WHERE game_id = ? AND slot = ?",
+            { round, game_id, winning_target_slot }
+        )
+        assert(not e3, "players.update: " .. tostring(e3))
+    end)
+    if not ok then
+        tx:rollback(); db:release()
+        return nil, "tx failed: " .. tostring(err)
+    end
+    local _, commit_err = tx:commit()
+    db:release()
+    if commit_err then
+        return nil, "commit: " .. tostring(commit_err)
+    end
+
+    alive[winning_target_slot] = false
+    local victim_pid = npc_pids[winning_target_slot]
+    if victim_pid then
+        process.send(victim_pid, "eliminated",
+            { slot = winning_target_slot, round = round })
+    end
+
+    -- SETUP-05: publish AFTER successful commit.
+    pe.publish_event("system", "night.resolved", "/" .. game_id, {
+        round = round,
+        victim_slot = winning_target_slot,
+        cause = "night",
+        revealed_role = revealed_role,
+        actor_slot = winning_actor_slot,
+    })
+
+    logger:info("[orchestrator] night resolved (villager_auto)", {
+        round = round,
+        victim_slot = winning_target_slot,
+        actor_slot = winning_actor_slot,
+        confidence = winning_conf,
+    })
+    return true, winning_target_slot
+end
+
 -- Phase 2 Plan 03: Day discussion phase.
 --
 -- D-15 invariant: this helper is the SOLE writer of the `messages` table and the
