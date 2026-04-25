@@ -1,13 +1,29 @@
 import { useLayoutEffect, useMemo, useRef } from "react";
 import { useStore } from "../store";
 import { ChatBubble } from "./ChatBubble";
+import { MafiaChatBubble } from "./MafiaChatBubble";
 import { SystemMessage } from "./SystemMessage";
+import type { ChatMessage } from "../types";
 
-export function ChatTranscript() {
+interface ChatTranscriptProps {
+  /**
+   * Phase 4 — when true (or when phase === 'ended'), merge `sideChat.messages`
+   * into the render set so the end-game scrollback shows mafia_chat bubbles
+   * in seq order alongside public chat. Villager-humans never received any
+   * mafia_chat events, so their merged set degenerates to public chat only
+   * (D-EG-01 / T-04-22).
+   */
+  showMafiaChat?: boolean;
+}
+
+export function ChatTranscript({ showMafiaChat = false }: ChatTranscriptProps = {}) {
   const messages = useStore((s) => s.chat.messages);
   const typing = useStore((s) => s.chat.typing);
   const roster = useStore((s) => s.game.roster);
   const playerSlot = useStore((s) => s.game.playerSlot);
+  const phase = useStore((s) => s.game.phase);
+  const sideChatMessages = useStore((s) => s.sideChat.messages);
+  const shouldRenderMafiaChat = showMafiaChat || phase === "ended";
 
   // Unified render list: committed messages + live "is typing..." bubbles,
   // both sorted by (round, seq). Orchestrator reserves a seq for each NPC
@@ -24,7 +40,7 @@ export function ChatTranscript() {
   // at render time. This protects against edge cases where typing.ended /
   // chat.line never deleted the entry in the store.
   type RenderItem =
-    | { kind: "committed"; round: number; seq?: number; msg: (typeof messages)[number]; id: string }
+    | { kind: "committed"; round: number; seq?: number; msg: ChatMessage; id: string }
     | { kind: "typing"; round: number; seq: number; typingKey: string; fromSlot: number };
 
   const renderItems = useMemo<RenderItem[]>(() => {
@@ -45,6 +61,30 @@ export function ChatTranscript() {
         id: `m-${i}-${msg.seq ?? "x"}`,
       });
     });
+
+    // Phase 4 — merge mafia_chat into the render set when end-game scrollback
+    // is enabled. Sort by (round, seq) downstream so mafia_chat interleaves
+    // with public chat in the order it was generated.
+    if (shouldRenderMafiaChat) {
+      sideChatMessages.forEach((sm, i) => {
+        const adapted: ChatMessage = {
+          seq: sm.seq,
+          round: sm.round,
+          fromSlot: sm.fromSlot,
+          fromName: sm.fromName,
+          text: sm.text,
+          kind: "mafia_chat",
+        };
+        items.push({
+          kind: "committed",
+          round: sm.round,
+          seq: sm.seq,
+          msg: adapted,
+          id: `mc-${i}-${sm.seq}`,
+        });
+      });
+    }
+
     Object.entries(typing).forEach(([typingKey, entry]) => {
       const exactKey = `${entry.round}:${entry.fromSlot}:${entry.seq}`;
       if (committedKeys.has(exactKey)) return;
@@ -64,7 +104,7 @@ export function ChatTranscript() {
       return 0;
     });
     return items;
-  }, [messages, typing]);
+  }, [messages, typing, sideChatMessages, shouldRenderMafiaChat]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
@@ -99,6 +139,22 @@ export function ChatTranscript() {
 
           if (msg.kind === "system") {
             return <SystemMessage key={item.id} text={msg.text} />;
+          }
+
+          if (msg.kind === "mafia_chat") {
+            // End-game scrollback path — render mafia_chat with wine bg.
+            return (
+              <MafiaChatBubble
+                key={item.id}
+                message={{
+                  seq: msg.seq ?? 0,
+                  round: msg.round,
+                  fromSlot: msg.fromSlot,
+                  fromName: msg.fromName,
+                  text: msg.text,
+                }}
+              />
+            );
           }
 
           return (
