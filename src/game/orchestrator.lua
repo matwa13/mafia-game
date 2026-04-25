@@ -585,6 +585,229 @@ local function commit_player_chat(game_id, round, from_slot, text, chat_seq)
     return commit_chat_line(game_id, round, from_slot, tostring(text or ""), chat_seq, "human")
 end
 
+-- Phase 4 LOOP-03 (Mafia branch): partner NPC opens with a side-chat suggestion;
+-- human and partner alternate strictly; loop ends when human submits
+-- player.night_pick. If partner is dead (D-SC-06), no side-chat — just wait for
+-- the human's pick. All side-chat lines persist via commit_chat_line with
+-- kind='mafia_chat' and scope='mafia' (D-SC-04 + D-15 SOLE writer).
+--
+-- chat_seq is the orchestrator's per-round seq counter; we reserve seq up-front
+-- before each NPC dispatch to preserve the seq-authoritative invariant
+-- (CLAUDE.md flow invariant — Phase 3 polish). The reply handler reuses the
+-- pre-reserved seq via pending_reply_seq (B2 fix per D-FLAG-01).
+--
+-- Returns: true, victim_slot on success; nil, err_str on failure.
+local function run_night_mafia_human(game_id, round, alive, roles, player_slot,
+                                     npc_pids, chat_seq, inbox, roster_names)
+    -- 1. Locate partner Mafia NPC (the OTHER mafia, not the human).
+    local partner_slot = nil
+    for slot = 1, 6 do
+        if slot ~= player_slot and roles[slot] == "mafia" then
+            partner_slot = slot
+            break
+        end
+    end
+    local partner_alive = partner_slot ~= nil and alive[partner_slot]
+
+    -- 2. Build living non-Mafia target list.
+    local living_target_slots = {}
+    local living_target_names = {}
+    for slot = 1, 6 do
+        if alive[slot] and roles[slot] ~= "mafia" then
+            table.insert(living_target_slots, slot)
+            table.insert(living_target_names,
+                (roster_names and roster_names[slot]) or ("slot-" .. slot))
+        end
+    end
+    if #living_target_slots == 0 then
+        return nil, "no living villagers"
+    end
+
+    -- 3. side_chat_history accumulates partner+human messages for partner's prompt context.
+    local side_chat_history = {}
+
+    -- 4. Open partner side-chat ONLY if partner alive (D-SC-06: partner dead → skip).
+    -- Seq-authoritative invariant (CLAUDE.md Phase 3 polish): reserve seq BEFORE
+    -- dispatch; the reply commit reuses the reserved value via pending_reply_seq.
+    -- DO NOT increment chat_seq again on reply — that wastes the reservation
+    -- and causes the partner's message to land at reserved+1 (gap at reserved).
+    local partner_thinking = false
+    local pending_reply_seq = nil  -- B2 fix per D-FLAG-01: pre-reserved reply seq.
+    if partner_alive then
+        chat_seq[round] = (chat_seq[round] or 0) + 1
+        local reserved = chat_seq[round]
+        pending_reply_seq = reserved
+        partner_thinking = true
+        process.send(npc_pids[partner_slot], "night.side_chat", {
+            round = round,
+            living_target_slots = living_target_slots,
+            living_target_names = living_target_names,
+            side_chat_history = side_chat_history,
+            preassigned_seq = reserved,  -- echo back in reply for ordering
+        })
+    end
+
+    -- 5. Loop until player.night_pick arrives. No upper message cap (D-SC-02).
+    local victim_slot = nil
+    while true do
+        local r = channel.select({ inbox:case_receive() })
+        if not r.ok then return nil, "inbox closed during mafia night" end
+        local msg = r.value
+        local tp = msg and msg:topic() or ""
+        local raw = (msg and msg:payload() and msg:payload():data()) or {}
+
+        if tp == "night.side_chat.reply" and partner_alive then
+            -- Partner replied. Persist the line. partner_thinking flips to false.
+            -- B2 fix (D-FLAG-01 + CLAUDE.md seq-authoritative invariant): use the
+            -- seq reserved at dispatch time (pending_reply_seq). DO NOT do
+            -- `chat_seq[round] = chat_seq[round] + 1` here — that double-increments
+            -- and creates a seq gap. The dispatch already reserved the slot.
+            local from_slot = tonumber(raw.from_slot) or partner_slot
+            local text = tostring(raw.side_chat_text or "")
+            local suggested_target_slot = tonumber(raw.suggested_target_slot)
+            local commit_seq = pending_reply_seq  -- reuse pre-reserved seq; no +1
+            pending_reply_seq = nil
+            local _, werr = commit_chat_line(
+                game_id, round, from_slot, text, chat_seq, "mafia_chat", commit_seq, "mafia")
+            if werr then
+                logger:warn("[orchestrator] mafia_chat commit failed (partner)",
+                    { err = tostring(werr) })
+            end
+            table.insert(side_chat_history,
+                { from = "partner", text = text, suggested_target_slot = suggested_target_slot })
+            partner_thinking = false
+            -- Suggestion is rendered SPA-side via the bubble's data payload; no extra event needed.
+
+        elseif tp == "player.mafia_chat" and not partner_thinking then
+            -- Human replied. Persist + dispatch next partner turn.
+            -- Seq accounting (B2 fix per D-FLAG-01 + seq-authoritative invariant):
+            --   * Human commit: reserve seq fresh (this is the dispatch site for the human).
+            --   * Partner dispatch: reserve seq up-front and store in pending_reply_seq;
+            --     the night.side_chat.reply handler reuses this exact value (no second +1).
+            local text = tostring(raw.text or "")
+            if text == "" then
+                logger:debug("[orchestrator] empty mafia_chat from human; ignoring")
+            else
+                chat_seq[round] = (chat_seq[round] or 0) + 1
+                local commit_seq = chat_seq[round]
+                local _, werr = commit_chat_line(
+                    game_id, round, player_slot, text, chat_seq, "mafia_chat", commit_seq, "mafia")
+                if werr then
+                    logger:warn("[orchestrator] mafia_chat commit failed (human)",
+                        { err = tostring(werr) })
+                end
+                table.insert(side_chat_history, { from = "human", text = text })
+
+                -- Dispatch partner's next turn (only if still alive).
+                -- Reserve seq NOW; the reply handler will commit at this exact value.
+                if partner_alive then
+                    chat_seq[round] = (chat_seq[round] or 0) + 1
+                    local reserved = chat_seq[round]
+                    pending_reply_seq = reserved
+                    partner_thinking = true
+                    process.send(npc_pids[partner_slot], "night.side_chat", {
+                        round = round,
+                        living_target_slots = living_target_slots,
+                        living_target_names = living_target_names,
+                        side_chat_history = side_chat_history,
+                        preassigned_seq = reserved,
+                    })
+                end
+            end
+
+        elseif tp == "player.mafia_chat" and partner_thinking then
+            -- Strict alternation guard (D-SC-03): human attempted to send while
+            -- partner is generating. Drop. The SPA is supposed to disable input
+            -- during partner_thinking but defense-in-depth here.
+            logger:debug("[orchestrator] mafia_chat from human while partner thinking; dropping")
+
+        elseif tp == "player.night_pick" then
+            -- Validate target is in the living non-Mafia list. Reject otherwise (T-04-13).
+            local target = tonumber(raw.target_slot)
+            local valid = false
+            for _, ts in ipairs(living_target_slots) do
+                if tonumber(ts) == target then valid = true; break end
+            end
+            if not valid then
+                logger:warn("[orchestrator] invalid night_pick target; ignoring",
+                    { target_slot = tostring(target) })
+            else
+                victim_slot = target
+                break
+            end
+
+        else
+            -- Drop unrelated messages (stale day chat, cross-round, unknown).
+        end
+    end
+
+    -- 6. Atomic SQL transaction (same shape as run_night_villager_auto / run_night_stub).
+    local revealed_role = roles[victim_slot]
+    local actor_slot = player_slot  -- The human is the picker.
+    local json_ok, json_mod = pcall(require, "json")
+    local reasoning_json
+    local payload = {
+        source = "mafia_human",
+        human_slot = player_slot,
+        target_slot = victim_slot,
+        side_chat_history = side_chat_history,
+        partner_alive = partner_alive,
+    }
+    if json_ok and json_mod and json_mod.encode then
+        reasoning_json = json_mod.encode(payload)
+    else
+        reasoning_json = string.format(
+            "{\"source\":\"mafia_human\",\"human_slot\":%d,\"target_slot\":%d,\"partner_alive\":%s}",
+            player_slot, victim_slot, tostring(partner_alive))
+    end
+
+    local db, db_err = sql.get("app:db")
+    if db_err or not db then return nil, "sql.get: " .. tostring(db_err) end
+    local tx, tx_err = db:begin()
+    if tx_err then db:release(); return nil, "begin: " .. tostring(tx_err) end
+    local now_ts = time.now():unix()
+    local ok, err = pcall(function()
+        local _, e1 = tx:execute(
+            "INSERT INTO night_actions (game_id, round, actor_slot, target_slot, created_at, reasoning_json) VALUES (?, ?, ?, ?, ?, ?)",
+            { game_id, round, actor_slot, victim_slot, now_ts, reasoning_json }
+        )
+        assert(not e1, "night_actions.insert: " .. tostring(e1))
+        local _, e2 = tx:execute(
+            "INSERT INTO eliminations (game_id, round, victim_slot, cause, revealed_role, created_at) VALUES (?, ?, ?, 'night', ?, ?)",
+            { game_id, round, victim_slot, revealed_role, now_ts }
+        )
+        assert(not e2, "eliminations.insert: " .. tostring(e2))
+        local _, e3 = tx:execute(
+            "UPDATE players SET alive = 0, died_round = ?, died_cause = 'night' WHERE game_id = ? AND slot = ?",
+            { round, game_id, victim_slot }
+        )
+        assert(not e3, "players.update: " .. tostring(e3))
+    end)
+    if not ok then tx:rollback(); db:release(); return nil, "tx failed: " .. tostring(err) end
+    local _, commit_err = tx:commit()
+    db:release()
+    if commit_err then return nil, "commit: " .. tostring(commit_err) end
+
+    alive[victim_slot] = false
+    local victim_pid = npc_pids[victim_slot]
+    if victim_pid then
+        process.send(victim_pid, "eliminated", { slot = victim_slot, round = round })
+    end
+
+    pe.publish_event("system", "night.resolved", "/" .. game_id, {
+        round = round,
+        victim_slot = victim_slot,
+        cause = "night",
+        revealed_role = revealed_role,
+        actor_slot = actor_slot,
+    })
+    logger:info("[orchestrator] night resolved (mafia_human)", {
+        round = round, victim_slot = victim_slot, actor_slot = actor_slot,
+        partner_alive = partner_alive, side_chat_msgs = #side_chat_history,
+    })
+    return true, victim_slot
+end
+
 -- Publish system/game_state_changed snapshot on every phase transition.
 -- Takes explicit fields to avoid wippy-lint struct-shape union issues (same
 -- pattern as run_night_stub / run_day_discussion).
