@@ -100,7 +100,7 @@ local SIDE_CHAT_SCHEMA = {
             description = "Internal reasoning (not shown to partner). Why this target?",
         },
     },
-    required = { "side_chat_text", "suggested_target_slot" },
+    required = { "side_chat_text", "suggested_target_slot", "reasoning" },
     additionalProperties = false,
 }
 
@@ -881,7 +881,7 @@ local function run_night_side_chat(state, raw)
         persist_error(state.npc_id, "side_chat", { type = "TIMEOUT", message = tostring(VOTE_CAP_S) }, 0)
         process.send(state.parent_pid, "night.side_chat.reply", {
             from_slot = state.slot,
-            side_chat_text = "...",
+            side_chat_text = "[side-chat unavailable]",
             suggested_target_slot = fallback_slot,
             reasoning = "llm_timeout",
             round = round,
@@ -899,7 +899,7 @@ local function run_night_side_chat(state, raw)
         persist_error(state.npc_id, "side_chat", rv_err, 0)
         process.send(state.parent_pid, "night.side_chat.reply", {
             from_slot = state.slot,
-            side_chat_text = "...",
+            side_chat_text = "[side-chat unavailable]",
             suggested_target_slot = fallback_slot,
             reasoning = "llm_error",
             round = round,
