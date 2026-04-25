@@ -889,12 +889,18 @@ local function emit_game_state_changed(game_id, alive_map, roles_map,
     local reveal_all = (phase == "ended")
     local roster = build_gsc_roster(alive_map, roles_map, slot_persona_map,
                                      roster_names_map, player_sl, reveal_all)
+    local player_role = roles_map and roles_map[player_sl]
+    local partner_slot = player_role == "mafia" and compute_partner_slot(roles_map, player_sl)
+    local partner_name = partner_slot and slot_persona_map and
+        slot_persona_map[partner_slot] and slot_persona_map[partner_slot].name
     pe.publish_event("system", "game_state_changed", "/" .. game_id, {
         phase = phase or "unknown",
         round = round or 0,
         alive = alive_map,
         roster = roster,
         player_slot = player_sl,
+        player_role = player_role,
+        partner_name = partner_name,
         game_id = game_id,
         chat_locked = chat_locked or false,
         winner = winner,
