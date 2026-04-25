@@ -52,6 +52,58 @@ local VOTE_SCHEMA = {
     additionalProperties = false,
 }
 
+-- LOOP-02 (Villager-auto): Mafia NPC's structured night-pick. Higher confidence
+-- wins on tie-break (orchestrator-side, Plan 04). target_slot is constrained to
+-- the living non-Mafia slot list passed in the night.pick request payload.
+local NIGHT_PICK_SCHEMA = {
+    type = "object",
+    properties = {
+        target_slot = {
+            type = "integer",
+            description = "Slot number of a living non-Mafia player to eliminate. Must be in the living_target_slots list.",
+        },
+        reasoning = {
+            type = "string",
+            maxLength = 300,
+            description = "One sentence explaining why this target.",
+        },
+        confidence = {
+            type = "integer",
+            minimum = 0,
+            maximum = 100,
+            description = "How confident you are in this pick, 0-100.",
+        },
+    },
+    required = { "target_slot", "reasoning", "confidence" },
+    additionalProperties = false,
+}
+
+-- LOOP-03: Mafia partner side-chat turn — one structured_output call per turn.
+-- Partner emits a short side-chat line PLUS a current target suggestion. The
+-- suggestion may evolve across turns as the human pushes back; the SPA's
+-- "Partner picks: X" badge updates each time.
+local SIDE_CHAT_SCHEMA = {
+    type = "object",
+    properties = {
+        side_chat_text = {
+            type = "string",
+            maxLength = 200,
+            description = "What you say to your partner (1-2 sentences max). In character.",
+        },
+        suggested_target_slot = {
+            type = "integer",
+            description = "Slot of living non-Mafia player you currently suggest targeting.",
+        },
+        reasoning = {
+            type = "string",
+            maxLength = 200,
+            description = "Internal reasoning (not shown to partner). Why this target?",
+        },
+    },
+    required = { "side_chat_text", "suggested_target_slot", "reasoning" },
+    additionalProperties = false,
+}
+
 -- Section C: error helpers (D-07 SQL persistence) ---------------------------
 
 --- Classify an LLM error. Retryable for RATE_LIMIT/SERVER_ERROR/TIMEOUT/
@@ -628,6 +680,267 @@ local function run_vote_turn(state, round)
     })
 end
 
+-- LOOP-02 (Villager-auto): respond to orchestrator's night.pick request.
+-- Mafia-only handler. Returns {from_slot, target_slot, reasoning, confidence, round}
+-- via process.send to parent_pid topic "night.pick.response".
+-- Mirrors run_vote_turn shape (coroutine + llm.structured_output + channel.select).
+-- Persona drift tripwire (assert_stable_hash) is the first thing we do — same as run_vote_turn.
+local function run_night_pick(state, raw)
+    assert_stable_hash(state)
+    state.round = (raw.round and tonumber(raw.round)) or state.round or 0
+    local round = state.round
+
+    -- Extract living_target_slots + living_target_names from raw payload.
+    local living_target_slots = {}
+    local living_target_names = {}
+    for k, v in pairs(raw) do
+        if k == "living_target_slots" then living_target_slots = v end
+        if k == "living_target_names" then living_target_names = v end
+    end
+    local fallback_slot = nil
+    if type(living_target_slots) == "table" and #living_target_slots > 0 then
+        fallback_slot = tonumber(living_target_slots[1])
+    end
+
+    -- Build prompt: persona stable_block + cache marker + dynamic tail
+    -- (event log + roster) + inline night-pick directive (mirrors run_last_words).
+    local p = prompt.new()
+    p:add_system(state.stable_block)
+    p:add_cache_marker()
+    local tail = visible_context(state.npc_id, {
+        role = state.role,
+        event_log = state.event_log or {},
+        roster = state.roster or {},
+        suspicion = state.suspicion,
+        roster_names = state.roster_names,
+        slot = state.slot,
+    }, "chat")
+    local names_str = table.concat(living_target_names or {}, ", ")
+    local slot_strs = {}
+    for _, x in ipairs(living_target_slots or {}) do
+        slot_strs[#slot_strs + 1] = tostring(x)
+    end
+    local slots_str = table.concat(slot_strs, ", ")
+    local directive = string.format(
+        "\n\n===NIGHT KILL===\nYou are Mafia. It is Night %d. Living non-Mafia targets: %s (slots: %s)\n"
+        .. "Pick ONE target slot to eliminate. Give your confidence 0-100. One sentence reasoning.",
+        round, names_str, slots_str)
+    p:add_user(tail .. directive)
+
+    local result_ch = channel.new(1)
+    coroutine.spawn(function()
+        local res, err = llm.structured_output(NIGHT_PICK_SCHEMA, p, { model = MODEL })
+        result_ch:send({ res = res, err = err })
+    end)
+    local deadline = time.after(VOTE_CAP_S)
+    local r = channel.select({ result_ch:case_receive(), deadline:case_receive() })
+
+    if not r.ok or r.channel ~= result_ch then
+        persist_error(state.npc_id, "night_pick", { type = "TIMEOUT", message = tostring(VOTE_CAP_S) }, 0)
+        process.send(state.parent_pid, "night.pick.response", {
+            from_slot = state.slot,
+            target_slot = fallback_slot,
+            reasoning = "llm_timeout",
+            confidence = 0,
+            round = round,
+        })
+        return
+    end
+
+    -- Unwrap result (same pattern as run_vote_turn's pairs() walk).
+    local rv = r.value
+    local rv_err, rv_res = nil, nil
+    for k, v in pairs(rv) do
+        if k == "err" then rv_err = v end
+        if k == "res" then rv_res = v end
+    end
+    if rv_err then
+        persist_error(state.npc_id, "night_pick", rv_err, 0)
+        process.send(state.parent_pid, "night.pick.response", {
+            from_slot = state.slot,
+            target_slot = fallback_slot,
+            reasoning = "llm_error",
+            confidence = 0,
+            round = round,
+        })
+        return
+    end
+
+    -- framework/llm wraps structured_output as { result = <schema_table>, ... }
+    local res_table = {}
+    if type(rv_res) == "table" then
+        local inner = nil
+        for k, v in pairs(rv_res) do
+            if k == "result" and type(v) == "table" then inner = v end
+        end
+        res_table = inner or rv_res
+    end
+
+    local target_slot = nil
+    local reasoning = ""
+    local confidence = 0
+    for k, v in pairs(res_table) do
+        if k == "target_slot" then target_slot = tonumber(v) end
+        if k == "reasoning" then reasoning = tostring(v) end
+        if k == "confidence" then confidence = tonumber(v) or 0 end
+    end
+
+    -- Defensive: if LLM returned an out-of-list slot, fall back to the first
+    -- living non-Mafia. Same approach as run_vote_turn name-to-slot resolution.
+    local valid = false
+    for _, slot in ipairs(living_target_slots or {}) do
+        if tonumber(slot) == target_slot then valid = true; break end
+    end
+    if not valid then
+        logger:warn("[npc] night_pick target out of range; falling back",
+            { npc = state.npc_id, target_slot = tostring(target_slot) })
+        target_slot = fallback_slot
+        reasoning = (reasoning ~= "" and reasoning or "out_of_range_fallback")
+    end
+
+    process.send(state.parent_pid, "night.pick.response", {
+        from_slot = state.slot,
+        target_slot = target_slot,
+        reasoning = reasoning,
+        confidence = confidence,
+        round = round,
+    })
+end
+
+-- LOOP-03 (Mafia side-chat): respond to orchestrator's night.side_chat request.
+-- Mafia-only handler. Returns {from_slot, side_chat_text, suggested_target_slot,
+-- reasoning, round} via process.send to parent_pid topic "night.side_chat.reply".
+-- Strict alternation is enforced by the orchestrator: it issues exactly one
+-- night.side_chat per turn and waits for the reply before re-enabling the human
+-- input. Persona drift tripwire fires first.
+local function run_night_side_chat(state, raw)
+    assert_stable_hash(state)
+    state.round = (raw.round and tonumber(raw.round)) or state.round or 0
+    local round = state.round
+
+    -- Pull living_target_slots/names + side_chat_history (recent partner exchange).
+    local living_target_slots = {}
+    local living_target_names = {}
+    local side_chat_history = {}
+    for k, v in pairs(raw) do
+        if k == "living_target_slots" then living_target_slots = v end
+        if k == "living_target_names" then living_target_names = v end
+        if k == "side_chat_history" then side_chat_history = v end
+    end
+    local fallback_slot = nil
+    if type(living_target_slots) == "table" and #living_target_slots > 0 then
+        fallback_slot = tonumber(living_target_slots[1])
+    end
+
+    local p = prompt.new()
+    p:add_system(state.stable_block)
+    p:add_cache_marker()
+
+    local tail = visible_context(state.npc_id, {
+        role = state.role,
+        event_log = state.event_log or {},
+        roster = state.roster or {},
+        suspicion = state.suspicion,
+        roster_names = state.roster_names,
+        slot = state.slot,
+    }, "chat")
+
+    -- Render side-chat history inline (recent partner exchange this round).
+    local chat_lines = {}
+    for _, m in ipairs(side_chat_history or {}) do
+        local from = tostring(m.from or "?")
+        local txt = tostring(m.text or "")
+        if txt ~= "" then chat_lines[#chat_lines + 1] = from .. ": " .. txt end
+    end
+    local chat_str = table.concat(chat_lines, "\n")
+
+    local names_str = table.concat(living_target_names or {}, ", ")
+    local slot_strs = {}
+    for _, x in ipairs(living_target_slots or {}) do
+        slot_strs[#slot_strs + 1] = tostring(x)
+    end
+    local slots_str = table.concat(slot_strs, ", ")
+    local directive = string.format(
+        "\n\n===MAFIA SIDE-CHAT===\nYou are Mafia, talking to your partner privately. Night %d.\n"
+        .. "Living non-Mafia targets: %s (slots: %s)\n"
+        .. "Recent exchange:\n%s\n\n"
+        .. "Reply with ONE short message (1-2 sentences) AND your current target suggestion (slot number).\n"
+        .. "Stay in character. The suggestion can change as you discuss.",
+        round, names_str, slots_str, chat_str)
+    p:add_user(tail .. directive)
+
+    local result_ch = channel.new(1)
+    coroutine.spawn(function()
+        local res, err = llm.structured_output(SIDE_CHAT_SCHEMA, p, { model = MODEL })
+        result_ch:send({ res = res, err = err })
+    end)
+    local deadline = time.after(VOTE_CAP_S)
+    local r = channel.select({ result_ch:case_receive(), deadline:case_receive() })
+
+    if not r.ok or r.channel ~= result_ch then
+        persist_error(state.npc_id, "side_chat", { type = "TIMEOUT", message = tostring(VOTE_CAP_S) }, 0)
+        process.send(state.parent_pid, "night.side_chat.reply", {
+            from_slot = state.slot,
+            side_chat_text = "[side-chat unavailable]",
+            suggested_target_slot = fallback_slot,
+            reasoning = "llm_timeout",
+            round = round,
+        })
+        return
+    end
+
+    local rv = r.value
+    local rv_err, rv_res = nil, nil
+    for k, v in pairs(rv) do
+        if k == "err" then rv_err = v end
+        if k == "res" then rv_res = v end
+    end
+    if rv_err then
+        persist_error(state.npc_id, "side_chat", rv_err, 0)
+        process.send(state.parent_pid, "night.side_chat.reply", {
+            from_slot = state.slot,
+            side_chat_text = "[side-chat unavailable]",
+            suggested_target_slot = fallback_slot,
+            reasoning = "llm_error",
+            round = round,
+        })
+        return
+    end
+
+    local res_table = {}
+    if type(rv_res) == "table" then
+        local inner = nil
+        for k, v in pairs(rv_res) do
+            if k == "result" and type(v) == "table" then inner = v end
+        end
+        res_table = inner or rv_res
+    end
+
+    local side_chat_text = ""
+    local suggested_target_slot = nil
+    local reasoning = ""
+    for k, v in pairs(res_table) do
+        if k == "side_chat_text" then side_chat_text = tostring(v) end
+        if k == "suggested_target_slot" then suggested_target_slot = tonumber(v) end
+        if k == "reasoning" then reasoning = tostring(v) end
+    end
+
+    -- Defensive: keep suggestion in the living-target list; fall back if not.
+    local valid = false
+    for _, slot in ipairs(living_target_slots or {}) do
+        if tonumber(slot) == suggested_target_slot then valid = true; break end
+    end
+    if not valid then suggested_target_slot = fallback_slot end
+
+    process.send(state.parent_pid, "night.side_chat.reply", {
+        from_slot = state.slot,
+        side_chat_text = side_chat_text,
+        suggested_target_slot = suggested_target_slot,
+        reasoning = reasoning,
+        round = round,
+    })
+end
+
 -- Section L: main loop + boot -----------------------------------------------
 
 local function main_loop(state, public_sub, mafia_sub, system_sub,
@@ -683,6 +996,26 @@ local function main_loop(state, public_sub, mafia_sub, system_sub,
                         if k == "round" then vote_round = v end
                     end
                     run_vote_turn(state, vote_round)
+                end
+
+            elseif tp == "night.pick" then
+                if state.dead then
+                    logger:info("[npc] dead; skipping night.pick", { npc = state.npc_id })
+                elseif state.role ~= "mafia" then
+                    logger:warn("[npc] non-mafia received night.pick; dropping",
+                        { npc = state.npc_id, role = state.role })
+                else
+                    run_night_pick(state, raw)
+                end
+
+            elseif tp == "night.side_chat" then
+                if state.dead then
+                    logger:info("[npc] dead; skipping night.side_chat", { npc = state.npc_id })
+                elseif state.role ~= "mafia" then
+                    logger:warn("[npc] non-mafia received night.side_chat; dropping",
+                        { npc = state.npc_id, role = state.role })
+                else
+                    run_night_side_chat(state, raw)
                 end
 
             elseif tp == "eliminated" then

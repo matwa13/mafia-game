@@ -16,6 +16,16 @@
 # that reference the literal strings do not register as false-positive
 # violations. The invariants are about Lua source-code behavior.
 
+# Phase 4 invariants confirmed (2026-04-25):
+# - commit_chat_line takes a scope parameter; D-15 grep regex still matches publish-call
+#   regardless of scope value. mafia_chat publishes go through the SOLE writer.
+# - Plugin (game_plugin.lua) gained a conditional mafia.mafia subscription;
+#   AP2 (no sql/pe/publish_event) holds.
+# - NPC (npc.lua) gained run_night_pick + run_night_side_chat; AP4 (llm.* only in
+#   src/npc/) holds.
+# - Orchestrator gained run_night_villager_auto + run_night_mafia_human; D-09
+#   (events.send only in src/lib/events.lua + src/probes/probe.lua) holds.
+
 set -euo pipefail
 
 fail=0
@@ -32,6 +42,8 @@ if [ -n "$d09_violations" ]; then
 fi
 
 # --- D-15: publish_event(..., "chat.line", ...) only in the orchestrator ---
+# Phase 4: commit_chat_line now takes a scope parameter; the gate matches the
+# publish-call shape regardless of scope value. SOLE writer is still orchestrator.lua.
 d15_violations=$(grep -rn --include='*.lua' 'publish_event.*chat\.line' src/ \
     | grep -v 'src/game/orchestrator\.lua' \
     || true)

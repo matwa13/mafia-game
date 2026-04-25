@@ -27,6 +27,12 @@
   --color-role-human: #c9a24a;
   --color-role-dead: #4a4d5a;
 
+  /* Phase 4 — night-mode atmospheric surface (NightOverlay panel + NightPicker top half) */
+  --color-night-surface: oklch(0.10 0.016 265);
+
+  /* Phase 4 — mafia side-chat bubble background (wine; never used outside mafia_chat) */
+  --color-mafia-chat-surface: oklch(0.18 0.030 15);
+
   /* Per-NPC persona colors (UI-SPEC §5 — 15 archetypes) */
   --persona-hedger: #d48b9a;
   --persona-blunt: #7a8898;
@@ -90,6 +96,17 @@ html, body, #root {
 
 @keyframes endGameEnter {
   from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Phase 4 — Night UI atmospheric fades */
+@keyframes nightOverlayEnter {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes mafiaChatsEnter {
+  from { opacity: 0; transform: translateY(4px); }
   to   { opacity: 1; transform: translateY(0); }
 }
 

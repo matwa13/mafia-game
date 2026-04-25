@@ -1,5 +1,12 @@
 import { create } from "zustand";
-import type { GameState, ChatMessage, VoteState } from "./types";
+import type {
+  GameState,
+  ChatMessage,
+  VoteState,
+  SideChatMessage,
+  SideChatSlice,
+  NightSlice,
+} from "./types";
 
 interface TypingEntry {
   fromSlot: number;
@@ -18,9 +25,17 @@ interface StoreState {
   game: GameState;
   chat: ChatSlice;
   vote: VoteState;
+  sideChat: SideChatSlice;
+  night: NightSlice;
   send: (type: string, data: unknown) => void;
   setSend: (fn: (type: string, data: unknown) => void) => void;
   applyFrame: (topic: string, data: unknown) => void;
+  /**
+   * Reset all per-game slices for a fresh start. Preserves `playerName` so
+   * the Setup screen doesn't re-prompt — Start New Game (D-EG-03) reuses the
+   * name the player entered for the just-finished game.
+   */
+  resetForNewGame: (playerName: string) => void;
 }
 
 const initialGame: GameState = {
@@ -36,6 +51,7 @@ const initialGame: GameState = {
   gameId: null,
   discussionReady: false,
   awaitingNextDay: false,
+  awaitingBeginDay: false,
 };
 
 const initialVote: VoteState = {
@@ -44,6 +60,18 @@ const initialVote: VoteState = {
   perVoter: [],
   tied: false,
   playerVote: null,
+};
+
+const initialSideChat: SideChatSlice = {
+  messages: [],
+  typing: {},
+  partnerSuggestedSlot: null,
+};
+
+const initialNight: NightSlice = {
+  awaitingBeginDay: false,
+  pickedSlot: null,
+  locked: false,
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -55,10 +83,22 @@ export const useStore = create<StoreState>((set, get) => ({
   game: initialGame,
   chat: { messages: [], typing: {} },
   vote: initialVote,
+  sideChat: initialSideChat,
+  night: initialNight,
   send: (_type: string, _data: unknown) => {
     console.warn("[store] send called before ws hook set it");
   },
   setSend: (fn) => set({ send: fn }),
+
+  resetForNewGame: (playerName: string) => {
+    set(() => ({
+      game: { ...initialGame, playerName },
+      chat: { messages: [], typing: {} },
+      vote: { ...initialVote },
+      sideChat: { ...initialSideChat, messages: [], typing: {} },
+      night: { ...initialNight },
+    }));
+  },
 
   applyFrame: (topic: string, rawData: unknown) => {
     const data = asRecord(rawData);
@@ -103,9 +143,22 @@ export const useStore = create<StoreState>((set, get) => ({
             gameId: data.game_id != null ? String(data.game_id) : s.game.gameId,
             discussionReady: roundChanged ? false : s.game.discussionReady,
             awaitingNextDay: roundChanged ? false : s.game.awaitingNextDay,
+            // Phase 4 — clear the begin-day gate on round transition. The
+            // orchestrator re-emits game_night_ready_for_day at the end of
+            // the new night; if we don't reset here, the previous night's
+            // flag would let the human click Begin Day before night resolves
+            // (T-04-24).
+            awaitingBeginDay: roundChanged ? false : s.game.awaitingBeginDay,
           },
           // Reset vote state on new game state
           vote: data.phase === "vote" ? { ...initialVote } : s.vote,
+          // Phase 4 — reset night + sideChat on round change so a stale
+          // pickedSlot / partnerSuggestedSlot from the previous night never
+          // leaks into the new one.
+          night: roundChanged ? { ...initialNight } : s.night,
+          sideChat: roundChanged
+            ? { ...initialSideChat, messages: [], typing: {} }
+            : s.sideChat,
         };
       });
       return;
@@ -118,6 +171,18 @@ export const useStore = create<StoreState>((set, get) => ({
 
     if (topic === "game_vote_complete") {
       set((s) => ({ game: { ...s.game, awaitingNextDay: true } }));
+      return;
+    }
+
+    if (topic === "game_night_ready_for_day") {
+      // Plugin maps `night.ready_for_day` → this topic (Plan 02). Flip both
+      // night.awaitingBeginDay (the slice authority) and the convenience
+      // mirror on game.* so selectors that don't drill into the night slice
+      // can still observe it.
+      set((s) => ({
+        night: { ...s.night, awaitingBeginDay: true },
+        game: { ...s.game, awaitingBeginDay: true },
+      }));
       return;
     }
 
@@ -159,16 +224,53 @@ export const useStore = create<StoreState>((set, get) => ({
     if (topic === "game_chat_line") {
       const round = Number(data.round);
       const fromSlot = Number(data.from_slot);
-      const seq = data.seq != null ? Number(data.seq) : undefined;
+      const seqRaw = data.seq != null ? Number(data.seq) : undefined;
+      const kind = (data.kind as ChatMessage["kind"]) ?? "npc";
       const roster = get().game.roster;
       const fromName = roster[fromSlot]?.name ?? String(data.from_slot ?? fromSlot);
+
+      // Phase 4 — kind="mafia_chat" routes to the side-chat slice instead
+      // of chat.messages. Villager-humans never receive this topic with
+      // kind=mafia_chat (the plugin filters by user_id → mafia subscription),
+      // so their sideChat.messages stays empty (D-EG-01).
+      if (kind === "mafia_chat" && seqRaw != null) {
+        const suggestedTargetSlot =
+          data.suggested_target_slot != null
+            ? Number(data.suggested_target_slot)
+            : undefined;
+        const sideMsg: SideChatMessage = {
+          seq: seqRaw,
+          round,
+          fromSlot,
+          fromName,
+          text: String(data.text ?? ""),
+          suggestedTargetSlot,
+        };
+        set((s) => {
+          const idx = s.sideChat.messages.findIndex((m) => m.seq === seqRaw);
+          const messages =
+            idx >= 0
+              ? s.sideChat.messages.map((m, i) => (i === idx ? sideMsg : m))
+              : [...s.sideChat.messages, sideMsg];
+          return {
+            sideChat: {
+              ...s.sideChat,
+              messages,
+              partnerSuggestedSlot:
+                suggestedTargetSlot ?? s.sideChat.partnerSuggestedSlot,
+            },
+          };
+        });
+        return;
+      }
+
       const msg: ChatMessage = {
-        seq,
+        seq: seqRaw,
         round,
         fromSlot,
         fromName,
         text: String(data.text ?? ""),
-        kind: (data.kind as ChatMessage["kind"]) ?? "npc",
+        kind,
       };
       // Clear any typing bubble for this (round, slot) — commit implicitly
       // ends typing. Prefix-match is defensive in case seq mismatched.

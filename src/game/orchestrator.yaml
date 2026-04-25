@@ -12,6 +12,7 @@ entries:
       - sql
       - uuid
       - env
+      - json
     imports:
       pe: app.lib:events
       sampler: app.npc:sampler

@@ -9,6 +9,9 @@ import { LastWordsCard } from "./components/LastWordsCard";
 import { EliminationRibbon } from "./components/EliminationRibbon";
 import { EndGameBanner } from "./components/EndGameBanner";
 import { CharacterIntro } from "./components/CharacterIntro";
+import { NightOverlay } from "./components/NightOverlay";
+import { NightPicker } from "./components/NightPicker";
+import { BeginDayRow } from "./components/BeginDayRow";
 import { Button } from "./components/primitives/Button";
 
 export default function App() {
@@ -21,11 +24,19 @@ export default function App() {
 
   const phase = useStore((s) => s.game.phase);
   const lastElim = useStore((s) => s.game.lastEliminated);
+  const playerRole = useStore((s) => s.game.playerRole);
+  const playerSlot = useStore((s) => s.game.playerSlot);
+  const roster = useStore((s) => s.game.roster);
 
   if (phase === null || phase === undefined) {
     return (
       <SetupScreen
-        onStart={(playerName) => send("game_start", { seed: 3, name: playerName })}
+        onStart={(playerName) => {
+          // Persist the name on the store before sending so Start New Game
+          // (D-EG-03) can re-use it without re-prompting the player.
+          useStore.setState((s) => ({ game: { ...s.game, playerName } }));
+          send("game_start", { seed: 3, name: playerName });
+        }}
       />
     );
   }
@@ -34,20 +45,31 @@ export default function App() {
     return <CharacterIntro onStart={() => send("game_start_game", {})} />;
   }
 
+  // Dead-Mafia fallback: a Mafia-human who's been eliminated falls through
+  // to the Villager-style overlay so they can still observe + click Begin
+  // Day, but cannot send mafia_chat or pick a target.
+  const playerEntry =
+    roster && playerSlot != null ? roster[playerSlot] : undefined;
+  const playerDead = playerEntry ? !playerEntry.alive : false;
+
   return (
     <div className="h-screen flex flex-col">
       <StatusBanner />
       {lastElim && <EliminationRibbon victimName={lastElim.name} />}
       <main className="flex-1 flex min-h-0">
-        {(phase === "day" || phase === "night") && (
+        {phase === "day" && (
           <>
             <ChatTranscript />
             <InterjectionInput />
           </>
         )}
+        {phase === "night" && playerRole === "villager" && <NightOverlay />}
+        {phase === "night" && playerRole === "mafia" &&
+          (playerDead ? <NightOverlay /> : <NightPicker />)}
         {phase === "vote" && <VotePanel />}
         {phase === "reveal" && <VotePanel />}
       </main>
+      {phase === "night" && <BeginDayRow />}
       <LastWordsCardWrapper />
       {phase === "ended" && <EndGameBanner />}
     </div>
@@ -107,10 +129,10 @@ function SetupScreen({ onStart }: { onStart: (name: string) => void }) {
             Start new game
           </Button>
         </div>
-        <div className="text-sm text-left space-y-1" style={{ color: "var(--color-text-muted)" }}>
-          <p>• 2 Mafia and 4 Villagers (you are one of 6)</p>
-          <p>• Night: Mafia picks a target. Day: town votes.</p>
-          <p>• Majority wins when the other side is out.</p>
+        <div className="text-sm space-y-1" style={{ color: "var(--color-text-muted)" }}>
+          <p>2 Mafia and 4 Villagers (you are one of 6)</p>
+          <p>Night: Mafia picks a target. Day: town votes.</p>
+          <p>Majority wins when the other side is out.</p>
         </div>
       </div>
     </div>
