@@ -2,9 +2,16 @@ import { useStore } from "../store";
 import { Badge } from "./primitives/Badge";
 import { RosterChip } from "./RosterChip";
 
-function phaseLabel(phase: string | null, round: number, chatLocked: boolean): string {
+function phaseLabel(
+  phase: string | null,
+  round: number,
+  chatLocked: boolean,
+  playerRole: string | null,
+): string {
   if (!phase) return "";
-  if (phase === "night") return `NIGHT ${round}`;
+  if (phase === "night") {
+    return playerRole === "mafia" ? `NIGHT ${round} · MAFIA` : `NIGHT ${round}`;
+  }
   if (phase === "day" && !chatLocked) return `DAY ${round} · DISCUSSION OPEN`;
   if (phase === "day" && chatLocked) return `DAY ${round} · LOCKED`;
   if (phase === "vote") return `DAY ${round} · VOTING`;
@@ -26,7 +33,7 @@ export function StatusBanner() {
     .filter(([, r]) => !r.alive)
     .map(([slot]) => Number(slot));
 
-  const label = phaseLabel(phase, round, chatLocked);
+  const label = phaseLabel(phase, round, chatLocked, playerRole);
   const roleVariant = playerRole === "mafia" ? "role-mafia" : "role-villager";
   const roleText =
     playerRole === "mafia"
