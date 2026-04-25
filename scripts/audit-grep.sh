@@ -32,6 +32,8 @@ if [ -n "$d09_violations" ]; then
 fi
 
 # --- D-15: publish_event(..., "chat.line", ...) only in the orchestrator ---
+# Phase 4: commit_chat_line now takes a scope parameter; the gate matches the
+# publish-call shape regardless of scope value. SOLE writer is still orchestrator.lua.
 d15_violations=$(grep -rn --include='*.lua' 'publish_event.*chat\.line' src/ \
     | grep -v 'src/game/orchestrator\.lua' \
     || true)
