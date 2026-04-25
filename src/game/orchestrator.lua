@@ -441,6 +441,7 @@ local function run_night_villager_auto(game_id, round, alive, roles, npc_pids, r
             "{\"source\":\"villager_auto\",\"winner_actor_slot\":%d,\"winner_target_slot\":%s,\"winner_confidence\":%d,\"tie_break\":%q}",
             winning_actor_slot, tostring(winning_target_slot), winning_conf, tie_break_note)
     end
+    reasoning_json = reasoning_json or "{}"
 
     -- 7. Atomic SQL transaction: night_actions + eliminations + players.UPDATE.
     --    Same shape as run_night_stub, plus reasoning_json column.
@@ -760,6 +761,7 @@ local function run_night_mafia_human(game_id, round, alive, roles, player_slot,
             "{\"source\":\"mafia_human\",\"human_slot\":%d,\"target_slot\":%d,\"partner_alive\":%s}",
             player_slot, victim_slot, tostring(partner_alive))
     end
+    reasoning_json = reasoning_json or "{}"
 
     local db, db_err = sql.get("app:db")
     if db_err or not db then return nil, "sql.get: " .. tostring(db_err) end
