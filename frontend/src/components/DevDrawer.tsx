@@ -138,9 +138,9 @@ export function DevDrawer() {
         </div>
       )}
 
-      {/* NPC cards */}
+      {/* NPC cards — slots 2..6 (slot 1 is the human player). */}
       <div className="flex flex-col gap-2 px-3 py-2" style={{ flex: 1 }}>
-        {[1, 2, 3, 4, 5].map((slot) => (
+        {[2, 3, 4, 5, 6].map((slot) => (
           <DevNpcCard
             key={slot}
             slot={slot}

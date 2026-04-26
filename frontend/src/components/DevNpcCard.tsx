@@ -7,9 +7,11 @@ interface Props {
   rosterNames: Record<number, string>;
 }
 
+// NPC suspicion values are 0-100 (orchestrator default 50, bounded 0..100).
+// Thresholds mirror that scale: green <=30, amber <=70, red >70.
 function suspicionColor(score: number): string {
-  if (score <= 3) return "var(--color-success)";
-  if (score <= 7) return "var(--color-accent)";
+  if (score <= 30) return "var(--color-success)";
+  if (score <= 70) return "var(--color-accent)";
   return "var(--color-danger)";
 }
 
@@ -89,27 +91,27 @@ export function DevNpcCard({ slot, npc, rosterNames }: Props) {
                     </span>
                     <div
                       className="flex-1 mx-2 rounded-full"
-                      style={{ height: 4, background: "var(--color-border)" }}
+                      style={{ height: 4, background: "var(--color-border)", minWidth: 0 }}
                     >
                       <div
                         className="rounded-full"
                         role="meter"
                         aria-valuenow={score}
                         aria-valuemin={0}
-                        aria-valuemax={10}
+                        aria-valuemax={100}
                         aria-label={`${targetName} suspicion`}
                         style={{
                           height: 4,
-                          width: `${(score / 10) * 100}%`,
+                          width: `${Math.max(0, Math.min(100, score))}%`,
                           background: suspicionColor(score),
                         }}
                       />
                     </div>
                     <span
                       className="text-xs text-right"
-                      style={{ width: 28, color: "var(--color-text-muted)", flexShrink: 0 }}
+                      style={{ width: 32, color: "var(--color-text-muted)", flexShrink: 0 }}
                     >
-                      {score}/10
+                      {score}/100
                     </span>
                   </div>
                 );
