@@ -1385,6 +1385,144 @@ local function test_v04_10_rounds_written(inbox, gm_pid)
 end
 
 -- ──────────────────────────────────────────────────────────────────
+-- V-05-01: dev_mode field on game_state_changed when MAFIA_DEV_MODE=1.
+-- Subscribe to mafia.system game_state_changed, start a game, assert
+-- data.dev_mode == true on the first frame received.
+-- SKIP if MAFIA_DEV_MODE != "1" (run test with env var set).
+-- ──────────────────────────────────────────────────────────────────
+local function test_v05_01_dev_mode_field_true(inbox, gm_pid)
+    local name = "V-05-01 dev-mode-field-true"
+    local current_dev = env.get("MAFIA_DEV_MODE")
+    if current_dev ~= "1" then
+        log_skip(name, "MAFIA_DEV_MODE=" .. tostring(current_dev)
+            .. "; re-run with MAFIA_DEV_MODE=1 to exercise this branch")
+        return
+    end
+
+    -- Subscribe to system events before starting the game.
+    local sys_sub = events.subscribe("mafia.system", "game_state_changed")
+    local sys_ch = sys_sub and sys_sub:channel() or nil
+    if not sys_ch then
+        log_fail(name, "events.subscribe failed")
+        return
+    end
+
+    local payload, err = start_game(inbox, gm_pid, 23, false)
+    if not payload then
+        sys_sub:close()
+        log_fail(name, "start_game: " .. tostring(err))
+        return
+    end
+    local game_id = field(payload, "game_id")
+    if not game_id then
+        sys_sub:close()
+        log_fail(name, "no game_id")
+        return
+    end
+
+    -- Wait for a game_state_changed event for this game.
+    local deadline = time.after("10s")
+    local found_dev_mode = nil
+    while true do
+        local r = channel.select({ sys_ch:case_receive(), deadline:case_receive() })
+        if not r.ok or r.channel == deadline then
+            break
+        end
+        local evt = r.value
+        if evt then
+            local data_ok, data = pcall(function() return evt:data() end)
+            if not data_ok then
+                -- try payload path
+                data_ok, data = pcall(function() return evt:payload() and evt:payload():data() end)
+            end
+            if data_ok and type(data) == "table" then
+                local evt_game_id = data.game_id
+                if evt_game_id == game_id then
+                    found_dev_mode = data.dev_mode
+                    break
+                end
+            end
+        end
+    end
+    sys_sub:close()
+
+    if found_dev_mode == true then
+        log_ok(name)
+    elseif found_dev_mode == nil then
+        log_fail(name, "no game_state_changed event received for game=" .. game_id
+            .. " within 10s (or dev_mode field absent)")
+    else
+        log_fail(name, "data.dev_mode=" .. tostring(found_dev_mode) .. " (expected true)")
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────
+-- V-05-02: dev_mode=false when MAFIA_DEV_MODE is not set.
+-- SKIP if MAFIA_DEV_MODE=1 (wrong env for this branch; runner must
+-- execute test_driver twice — once with and once without the env var).
+-- ──────────────────────────────────────────────────────────────────
+local function test_v05_02_dev_mode_field_false(inbox, gm_pid)
+    local name = "V-05-02 dev-mode-field-false"
+    local current_dev = env.get("MAFIA_DEV_MODE")
+    if current_dev == "1" then
+        log_skip(name, "MAFIA_DEV_MODE=1; re-run without env var to exercise false branch")
+        return
+    end
+
+    local sys_sub = events.subscribe("mafia.system", "game_state_changed")
+    local sys_ch = sys_sub and sys_sub:channel() or nil
+    if not sys_ch then
+        log_fail(name, "events.subscribe failed")
+        return
+    end
+
+    local payload, err = start_game(inbox, gm_pid, 29, false)
+    if not payload then
+        sys_sub:close()
+        log_fail(name, "start_game: " .. tostring(err))
+        return
+    end
+    local game_id = field(payload, "game_id")
+    if not game_id then
+        sys_sub:close()
+        log_fail(name, "no game_id")
+        return
+    end
+
+    local deadline = time.after("10s")
+    local found_dev_mode = nil
+    local found_event = false
+    while true do
+        local r = channel.select({ sys_ch:case_receive(), deadline:case_receive() })
+        if not r.ok or r.channel == deadline then break end
+        local evt = r.value
+        if evt then
+            local data_ok, data = pcall(function() return evt:data() end)
+            if not data_ok then
+                data_ok, data = pcall(function() return evt:payload() and evt:payload():data() end)
+            end
+            if data_ok and type(data) == "table" then
+                local evt_game_id = data.game_id
+                if evt_game_id == game_id then
+                    found_event = true
+                    found_dev_mode = data.dev_mode
+                    break
+                end
+            end
+        end
+    end
+    sys_sub:close()
+
+    if not found_event then
+        log_fail(name, "no game_state_changed event for game=" .. game_id .. " within 10s")
+    elseif found_dev_mode == false then
+        log_ok(name)
+    else
+        log_fail(name, "data.dev_mode=" .. tostring(found_dev_mode) .. " (expected false)")
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────
 -- V-05-11: persona_blob populated — after game start, all 5 NPC rows in
 -- players have a non-empty persona_blob (within 5s). Stub mode has no persona
 -- args; SKIP if MAFIA_NPC_MODE != "real".
@@ -1688,6 +1826,7 @@ local function run(_args)
         logger:info("[test_driver] real-LLM end-to-end: run wippy + browser per 04-06-PLAN.md checkpoint")
 
         -- ── Phase 5 V-05-XX scenarios ──────────────────────────────────
+        -- V-05-01/02: dev_mode field on game_state_changed.
         -- V-05-11/12 require MAFIA_NPC_MODE=real (persona blobs only in real mode).
         -- V-05-13 runs in stub mode (rounds UPSERT is mode-independent).
         logger:info("[test_driver] starting Phase 5 V-05-XX tests")
@@ -1696,6 +1835,12 @@ local function run(_args)
         if not v05_gm_pid then
             logger:error("[test_driver] V-05-XX: game_manager not found; skipping Phase 5 tests")
         else
+            -- V-05-01: dev_mode=true when MAFIA_DEV_MODE=1 (SKIPs if not set).
+            test_v05_01_dev_mode_field_true(inbox, v05_gm_pid)
+
+            -- V-05-02: dev_mode=false when MAFIA_DEV_MODE unset (SKIPs if =1).
+            test_v05_02_dev_mode_field_false(inbox, v05_gm_pid)
+
             -- V-05-11: persona_blob populated for all NPC slots (real mode only).
             test_v05_11_persona_blob_populated(inbox, v05_gm_pid)
 

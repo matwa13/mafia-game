@@ -944,6 +944,7 @@ local function emit_game_state_changed(game_id, alive_map, roles_map,
     pe.publish_event("system", "game_state_changed", "/" .. game_id, {
         phase = phase or "unknown",
         round = round or 0,
+        dev_mode = dev_mode(),   -- D-DEV-04: SPA reads this to render DEV chip
         alive = alive_map,
         roster = roster,
         player_slot = player_sl,
