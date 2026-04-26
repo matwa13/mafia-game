@@ -1999,6 +1999,519 @@ local function record_round_phase(game_id, round, phase)
     db:release()
 end
 
+-- Phase 5 D-RH-02: rehydrate orchestrator state from SQL after a mid-game crash.
+-- Reads only existing tables (games, players, messages, rounds, votes, eliminations);
+-- no migrations, no new tables (D-SCH-01). Returns a state struct mirroring the
+-- fresh-INIT shape, ready to be passed to the FSM loop.
+--
+-- Phase inference (RESEARCH.md Pattern 3): rounds.phase is now reliably written by
+-- the Plan 01 UPSERT, but we belt-and-suspenders fall back to message/votes/elim
+-- counts if the rounds row says "night" while later evidence (votes, elims, day
+-- chat messages) shows we got further.
+local function rehydrate_state(game_id, player_name)
+    local db, err = sql.get("app:db")
+    if err or not db then return nil, "sql.get: " .. tostring(err) end
+
+    local games_rows = db:query(
+        "SELECT rng_seed, player_slot, player_role FROM games WHERE id = ?",
+        { game_id })
+    if not games_rows or not games_rows[1] then
+        db:release()
+        return nil, "no games row for " .. tostring(game_id)
+    end
+    local g = games_rows[1]
+
+    local players_rows = db:query(
+        "SELECT slot, role, alive, display_name, persona_blob FROM players WHERE game_id = ? ORDER BY slot",
+        { game_id }) or {}
+
+    local seq_rows = db:query(
+        "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM messages WHERE game_id = ?",
+        { game_id }) or {}
+    local max_seq = (seq_rows[1] and tonumber(seq_rows[1].max_seq)) or 0
+
+    local rounds_rows = db:query(
+        "SELECT round, phase FROM rounds WHERE game_id = ? ORDER BY round DESC LIMIT 1",
+        { game_id }) or {}
+    local current_round = (rounds_rows[1] and tonumber(rounds_rows[1].round)) or 1
+    local current_phase = (rounds_rows[1] and rounds_rows[1].phase) or "intro"
+
+    -- Phase inference fallback (RESEARCH.md Pattern 3): if rounds.phase says
+    -- "night" but later evidence exists, advance the inferred phase. Plan 01's
+    -- UPSERT fixed the underlying write bug, but stale rows from games started
+    -- before that fix would mis-infer.
+    if current_phase == "night" then
+        local elim_rows = db:query(
+            "SELECT COUNT(*) AS n FROM eliminations WHERE game_id = ? AND round = ?",
+            { game_id, current_round }) or {}
+        local vote_rows = db:query(
+            "SELECT COUNT(*) AS n FROM votes WHERE game_id = ? AND round = ?",
+            { game_id, current_round }) or {}
+        local day_msg_rows = db:query(
+            "SELECT COUNT(*) AS n FROM messages WHERE game_id = ? AND round = ? AND kind = 'chat'",
+            { game_id, current_round }) or {}
+        local elim_n = (elim_rows[1] and tonumber(elim_rows[1].n)) or 0
+        local vote_n = (vote_rows[1] and tonumber(vote_rows[1].n)) or 0
+        local day_n = (day_msg_rows[1] and tonumber(day_msg_rows[1].n)) or 0
+        if elim_n > 0 and vote_n > 0 then
+            current_phase = "reveal"
+        elseif vote_n > 0 then
+            current_phase = "vote"
+        elseif day_n > 0 then
+            current_phase = "day"
+        end
+    end
+
+    -- Has the night-kill elimination already landed for the current round?
+    -- Drives the rehydrate-skip-night branch in run_rehydrated below.
+    local night_elim_rows = db:query(
+        "SELECT COUNT(*) AS n FROM eliminations WHERE game_id = ? AND round = ? AND cause = 'night'",
+        { game_id, current_round }) or {}
+    local night_resolved = ((night_elim_rows[1] and tonumber(night_elim_rows[1].n)) or 0) > 0
+
+    db:release()
+
+    -- Build state struct mirroring the fresh-INIT layout.
+    local roles = {}
+    local alive = {}
+    local roster_names = {}
+    local slot_persona_blobs = {}
+    local display_names = {}
+    for _, p in ipairs(players_rows) do
+        local slot = tonumber(p.slot)
+        if slot then
+            roles[slot] = p.role
+            alive[slot] = (tonumber(p.alive) == 1)
+            display_names[slot] = p.display_name
+            slot_persona_blobs[slot] = p.persona_blob
+        end
+    end
+
+    local pslot = tonumber(g.player_slot) or 1
+    -- player_name is not persisted on rehydration (games table has no column);
+    -- fall back to the supplied default ("You") so partner_name / chat displays
+    -- render legibly. Real name is lost for this session — accepted MVP cost.
+    local pname = player_name or "You"
+    roster_names[pslot] = pname
+
+    return {
+        game_id            = game_id,
+        rng_seed           = tonumber(g.rng_seed),
+        player_slot        = pslot,
+        player_name        = pname,
+        player_role        = g.player_role,
+        force_tie          = false,
+        roles              = roles,
+        alive              = alive,
+        roster_names       = roster_names,
+        display_names      = display_names,
+        slot_persona_blobs = slot_persona_blobs,
+        chat_seq_start     = max_seq,
+        round              = tonumber(current_round) or 1,
+        phase              = current_phase,
+        night_resolved     = night_resolved,
+        rehydrating        = true,
+    }, nil
+end
+
+-- Phase 5 D-RH-03: respawn living NPCs with their persisted persona_blob so the
+-- SHA tripwire passes byte-identically. Each NPC's INIT path sees args.persona_blob
+-- and skips re-rendering — the blob from SQL is treated as the canonical stable_block.
+-- Returns npc_pids map (slot -> pid) on success.
+local function respawn_npcs_for_rehydrate(game_id, roles, alive, player_slot,
+                                          slot_persona_blobs, roster_names,
+                                          display_names)
+    local mode = npc_mode()
+    local target = (mode == "real") and "app.npc:npc" or "app.npc:npc_stub"
+    local npc_pids = {}
+    for slot = 1, 6 do
+        if slot ~= player_slot and alive[slot] then
+            -- Compute partner_slot/name (mafia only) — same logic as spawn_npcs.
+            local partner_slot = nil
+            local partner_name = nil
+            if roles[slot] == "mafia" then
+                for s = 1, 6 do
+                    if s ~= slot and roles[s] == "mafia" then
+                        partner_slot = s
+                        if s == player_slot then
+                            partner_name = (roster_names and roster_names[player_slot]) or "You"
+                        else
+                            partner_name = (roster_names and roster_names[s])
+                                or (display_names and display_names[s])
+                        end
+                        break
+                    end
+                end
+            end
+            local spawn_args = {
+                game_id = game_id, slot = slot, role = roles[slot],
+                mafia_partner_slot = partner_slot,
+                mafia_partner_name = partner_name,
+                parent_pid = process.pid(),
+                -- D-RH-03: pre-rendered persona blob; NPC INIT detects this and
+                -- skips re-render so the SHA tripwire passes byte-identically.
+                persona_blob = slot_persona_blobs and slot_persona_blobs[slot] or nil,
+                roster_names = roster_names,
+            }
+            -- Best-effort name passthrough (NPC INIT uses it for logging only when
+            -- persona_blob is supplied; the blob already encodes the rendered name).
+            if display_names and display_names[slot] then
+                spawn_args.name = display_names[slot]
+            end
+            local pid, sp_err = process.spawn_linked_monitored(target, "app.processes:host", spawn_args)
+            if not pid then
+                return nil, "spawn slot=" .. slot .. ": " .. tostring(sp_err)
+            end
+            npc_pids[slot] = pid
+        end
+    end
+    return npc_pids, nil
+end
+
+-- Phase 5 D-RH-01: rehydrate-and-run. Builds the orchestrator state from SQL,
+-- respawns living NPCs, re-emits game_state_changed (so the SPA's
+-- ReconnectingOverlay can dismiss), then enters the FSM loop at the right
+-- re-entry point per D-RH-05. The loop and helpers (run_night_*, run_day_*,
+-- run_vote_*) are reused verbatim from the fresh-INIT path.
+--
+-- Re-entry policy (D-RH-05, simplified for MVP):
+--   intro → re-block on player.start_game; then enter Night 1.
+--   night → if eliminations row for current round exists, skip night and enter
+--           Begin-Day gate; else re-run night fresh.
+--   day | vote | reveal → enter Begin-Day gate (night was resolved).
+--   ended → re-emit ended frame and exit (defensive; check_game_in_flight
+--           rejects ended games before respawn so this should not be reached).
+--
+-- This MVP intentionally re-runs whatever phase wasn't fully committed, accepting
+-- that some chat / vote turns may be re-issued. commit_chat_line is the SOLE writer
+-- of messages (D-15); chat_seq advances past max(seq) so re-issued turns don't
+-- collide with already-committed rows. Re-issued LLM calls are the documented
+-- D-RH-04 cost.
+local function run_rehydrated(rstate, gm_pid)
+    local game_id = rstate.game_id
+    local player_slot = rstate.player_slot
+    local rng_seed = rstate.rng_seed
+    local dev = dev_mode()
+
+    -- Re-seed any global-RNG sites (det_rng is per-call, so this is belt-and-
+    -- suspenders for legacy math.random callers). D-SD-06 amended.
+    if rng_seed then math.randomseed(rng_seed) end
+
+    -- Respawn living NPCs (D-RH-03).
+    local npc_pids, spawn_err = respawn_npcs_for_rehydrate(
+        game_id, rstate.roles, rstate.alive, player_slot,
+        rstate.slot_persona_blobs, rstate.roster_names, rstate.display_names)
+    if not npc_pids then
+        logger:error("[orchestrator] rehydrate: respawn_npcs failed",
+            { err = tostring(spawn_err) })
+        return { status = "error", game_id = game_id }
+    end
+
+    -- Wait for NPC readiness (same gate the fresh path uses; re-spawned NPCs send
+    -- npc.ready exactly like fresh ones). Count = number of living NPC slots.
+    local inbox = process.inbox()
+    local expected = 0
+    for slot = 1, 6 do
+        if slot ~= player_slot and rstate.alive[slot] then
+            expected = expected + 1
+        end
+    end
+    if expected > 0 then
+        local _, gather_err = gather_readiness(inbox, expected, "5s")
+        if gather_err then
+            logger:warn("[orchestrator] rehydrate: NPC readiness incomplete",
+                { err = gather_err })
+            -- Continue anyway; missing NPCs surface as unavailable in dev panel
+            -- and absent voters in the round.
+        end
+    end
+
+    -- Build slot_persona stub map so emit_game_state_changed has stable input.
+    -- Phase 5 V-1 rehydration does NOT re-derive structured persona objects;
+    -- only the rendered blob is on disk. Pass an empty map and rely on
+    -- display_names from players for roster.name.
+    local slot_persona = {}
+
+    -- Build the FSM state struct using the existing shape.
+    local state = {
+        game_id = game_id,
+        rng_seed = rng_seed,
+        player_slot = player_slot,
+        player_name = rstate.player_name,
+        force_tie = rstate.force_tie or false,
+        driver_pid = nil,
+        gm_pid = gm_pid,
+        round = rstate.round or 1,
+        phase = rstate.phase or "intro",
+        roles = rstate.roles,
+        roster = build_roster(rstate.roles),
+        npc_pids = npc_pids,
+        alive = rstate.alive,
+        chat_seq = {},
+        slot_persona = slot_persona,
+        roster_names = rstate.roster_names,
+        name_to_slot = {},
+        dev_event_tail = {},
+        dev_event_tail_idx = 0,
+    }
+    -- chat_seq is per-round: seed each round's counter past max(seq) so re-issued
+    -- chat lines don't collide with already-committed rows. The simplest correct
+    -- thing is to bump chat_seq[round] = max_seq for the current round; later
+    -- rounds will start from 0 naturally (no chat exists yet).
+    state.chat_seq[state.round] = rstate.chat_seq_start or 0
+
+    -- Notify game_manager that the orchestrator is up under the same game_id
+    -- (D-RH-01) so any pending player commands can be routed. The relay plugin
+    -- separately re-looks-up the orch pid via process.registry on each command
+    -- (Pitfall 5 mitigation in game_plugin).
+    process.send(gm_pid, "orchestrator.ready", {
+        game_id = game_id,
+        player_role = state.roles[player_slot],
+        player_slot = player_slot,
+        roster = state.roster,
+        roster_names = state.roster_names,
+        partner_slot = compute_partner_slot(state.roles, player_slot),
+        rehydrated = true,
+    })
+
+    -- Re-emit game_state_changed so the SPA's ReconnectingOverlay dismisses
+    -- (it clears on the first post-reconnect game_state_changed for the active
+    -- game_id — D-RH-06).
+    emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
+        state.roster_names, player_slot, state.phase, state.round, false)
+    append_dev_event(state, "system", "game_state_changed", "/" .. game_id)
+    emit_dev_snapshot(state)
+    logger:info("[orchestrator] rehydrated", {
+        game_id = game_id,
+        round = state.round,
+        phase = state.phase,
+        living_npcs = expected,
+        chat_seq_start = rstate.chat_seq_start,
+    })
+
+    -- D-RH-05 phase resume policies.
+    if state.phase == "intro" then
+        -- Re-block on player.start_game (intro gate). Same shape as fresh path.
+        while true do
+            local r = channel.select({ inbox:case_receive() })
+            if not r.ok then return { status = "error", game_id = game_id } end
+            local msg = r.value
+            if msg and msg:topic() == "player.start_game" then break end
+        end
+        -- Drop into the FSM loop at round 0; it'll increment to 1 and run Night 1.
+        state.round = 0
+    elseif state.phase == "ended" then
+        -- Defensive: should not be reached because game_manager only respawns
+        -- when ended_at IS NULL. Re-emit ended frame and exit.
+        return { status = "ended", game_id = game_id }
+    else
+        -- Non-intro: enter the FSM loop AT the start of state.round, optionally
+        -- skipping the night phase if it was already resolved.
+        -- The loop unconditionally does `state.round = state.round + 1`, so set
+        -- state.round = current_round - 1. The skip-night flag is consumed on
+        -- the first iteration only.
+        state.round = state.round - 1
+        state.rehydrate_skip_night = rstate.night_resolved == true
+    end
+
+    -- 8. Post-INIT FSM loop — copy of the loop body from the fresh-INIT run().
+    -- Kept inline (rather than refactored to a shared helper) because the loop
+    -- references many local helpers (run_night_*, run_day_*, run_vote_*, etc.)
+    -- that live in this file and the duplication is short relative to the
+    -- refactor risk.
+    local winner = nil
+    local living_mafia, living_villagers
+    while not winner do
+        state.round = (state.round or 0) + 1
+
+        -- D-SCH-02 / WR-06: record phase visit.
+        record_round_phase(game_id, state.round, "night")
+
+        state.phase = "night"
+        emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
+            state.roster_names, player_slot, "night", state.round, false)
+        append_dev_event(state, "system", "game_state_changed", "/" .. game_id)
+        emit_dev_snapshot(state)
+
+        -- D-RH-05: skip the night phase if rehydration determined it was
+        -- already resolved on disk (eliminations row present for this round).
+        local night_result = nil
+        local skipped_night = state.rehydrate_skip_night == true
+        state.rehydrate_skip_night = nil  -- consume after first iteration
+
+        if not skipped_night then
+            local ok_night
+            if npc_mode() == "real" then
+                if state.roles[player_slot] == "villager" then
+                    ok_night, night_result = run_night_villager_auto(
+                        game_id, state.round, state.alive, state.roles, state.npc_pids,
+                        state.roster_names)
+                else
+                    ok_night, night_result = run_night_mafia_human(
+                        game_id, state.round, state.alive, state.roles, player_slot,
+                        state.npc_pids, state.chat_seq, inbox, state.roster_names)
+                end
+            else
+                ok_night, night_result = run_night_stub(
+                    game_id, state.round, rng_seed, state.alive, state.roles, state.npc_pids)
+            end
+            if not ok_night then
+                logger:error("[orchestrator] rehydrate: night helper failed",
+                    { mode = npc_mode(), err = tostring(night_result) })
+                break
+            end
+
+            -- D-NU-03: 3s min-dwell.
+            local night_dwell = time.after("3s")
+            while true do
+                local r = channel.select({ inbox:case_receive(), night_dwell:case_receive() })
+                if not r.ok or r.channel == night_dwell then break end
+            end
+        else
+            -- Skipped night: re-derive night_result from eliminations so the
+            -- day-entry game_state_changed_elim frame can name the victim.
+            local db, db_err = sql.get("app:db")
+            if db and not db_err then
+                local rows = db:query(
+                    "SELECT victim_slot FROM eliminations WHERE game_id = ? AND round = ? AND cause = 'night'",
+                    { game_id, state.round })
+                db:release()
+                if rows and rows[1] then
+                    night_result = tonumber(rows[1].victim_slot)
+                end
+            end
+            logger:info("[orchestrator] rehydrate: skipped already-resolved night",
+                { round = state.round, victim_slot = night_result })
+        end
+
+        -- Begin-Day gate (D-NU-02), unchanged from fresh path.
+        local pre_gate_drain = time.after("50ms")
+        while true do
+            local r = channel.select({ inbox:case_receive(), pre_gate_drain:case_receive() })
+            if not r.ok or r.channel == pre_gate_drain then break end
+        end
+        pe.publish_event("system", "night.ready_for_day", "/" .. game_id, {
+            round = state.round,
+        })
+        append_dev_event(state, "system", "night.ready_for_day", "/" .. game_id)
+        emit_dev_snapshot(state)
+        while true do
+            local r = channel.select({ inbox:case_receive() })
+            if not r.ok then break end
+            local msg = r.value
+            if msg and msg:topic() == "player.advance_phase" then
+                local raw = (msg:payload() and msg:payload():data()) or {}
+                if tonumber(raw.round) == state.round then break end
+            end
+        end
+
+        winner, living_mafia, living_villagers = check_win(state.alive, state.roles)
+        if winner then break end
+
+        record_round_phase(game_id, state.round, "day")
+
+        state.phase = "day"
+        if type(night_result) == "number" and state.roster_names then
+            local vname = state.roster_names[night_result] or ("slot-" .. night_result)
+            local vrole = (state.roles and state.roles[night_result]) or "villager"
+            emit_game_state_changed_elim(game_id, state.alive, state.roles, state.slot_persona,
+                state.roster_names, player_slot, "day", state.round,
+                night_result, vname, vrole, "night",
+                false)
+        else
+            emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
+                state.roster_names, player_slot, "day", state.round, false)
+        end
+        append_dev_event(state, "system", "game_state_changed", "/" .. game_id)
+
+        local ok_day, day_err
+        if npc_mode() == "real" then
+            ok_day, day_err = run_day_discussion_streaming(
+                game_id, state.round, state.alive, state.player_slot, state.npc_pids,
+                dev, state.chat_seq, inbox,
+                state.rng_seed, state.roles, state.slot_persona, state.roster_names,
+                state)
+        else
+            ok_day, day_err = run_day_discussion(
+                game_id, state.round, state.alive, state.player_slot, state.npc_pids,
+                dev and "3s" or "60s", dev and 100 or 500, dev, state.chat_seq, inbox)
+        end
+        if not ok_day then
+            logger:error("[orchestrator] rehydrate: day helper failed",
+                { err = tostring(day_err) })
+            break
+        end
+
+        record_round_phase(game_id, state.round, "vote")
+
+        state.phase = "vote"
+        emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
+            state.roster_names, player_slot, "vote", state.round, false)
+        append_dev_event(state, "system", "game_state_changed", "/" .. game_id)
+        emit_dev_snapshot(state)
+
+        local ok_vote, vote_err
+        if npc_mode() == "real" then
+            ok_vote, vote_err = run_vote_round_llm(
+                game_id, state.round, state.alive, state.roles,
+                state.player_slot, state.npc_pids, state.force_tie, inbox,
+                state.chat_seq, state.roster_names, state.slot_persona,
+                state)
+        else
+            ok_vote, vote_err = run_vote_round(
+                game_id, state.round, state.alive, state.roles,
+                state.player_slot, state.npc_pids, state.force_tie, inbox)
+        end
+        if not ok_vote then
+            logger:error("[orchestrator] rehydrate: vote helper failed",
+                { err = tostring(vote_err) })
+            break
+        end
+
+        winner, living_mafia, living_villagers = check_win(state.alive, state.roles)
+
+        if not winner then
+            local pre_gate_drain2 = time.after("50ms")
+            while true do
+                local r = channel.select({ inbox:case_receive(), pre_gate_drain2:case_receive() })
+                if not r.ok or r.channel == pre_gate_drain2 then break end
+            end
+            pe.publish_event("system", "day.vote_complete", "/" .. game_id, {
+                round = state.round,
+            })
+            append_dev_event(state, "system", "day.vote_complete", "/" .. game_id)
+            emit_dev_snapshot(state)
+            while true do
+                local r = channel.select({ inbox:case_receive() })
+                if not r.ok then break end
+                local msg = r.value
+                if msg and msg:topic() == "player.advance_phase" then
+                    local raw = (msg:payload() and msg:payload():data()) or {}
+                    if tonumber(raw.round) == state.round then break end
+                end
+            end
+        end
+    end
+
+    if winner then
+        state.phase = "ended"
+        emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
+            state.roster_names, player_slot, "ended", state.round, false, winner)
+        append_dev_event(state, "system", "game_state_changed", "/" .. game_id)
+        emit_dev_snapshot(state)
+        shutdown_cascade(game_id, state.round, winner,
+            living_mafia, living_villagers, state.npc_pids)
+        return { status = "ended", winner = winner, final_round = state.round }
+    end
+
+    logger:error("[orchestrator] rehydrate: FSM terminated without winner",
+        { game_id = game_id, round = state.round })
+    for _, pid in pairs(state.npc_pids) do
+        process.cancel(pid, "500ms")
+    end
+    return { status = "error", game_id = game_id }
+end
+
 local function run(args)
     args = args or {}
     local game_id = args.game_id
@@ -2031,6 +2544,32 @@ local function run(args)
 
     -- 2. trap_links so stub crashes land on our events channel (Plan 04 handles them).
     process.set_options({ trap_links = true })
+
+    -- Phase 5 D-RH-01: detect mid-game crash respawn. If a games row exists
+    -- with started_at not null AND ended_at null, the previous orchestrator
+    -- for this game_id crashed. Branch to rehydrate_state instead of fresh INIT.
+    -- game_manager only respawns under this condition, but the check here is
+    -- belt-and-suspenders so a manual respawn (test harness) also rehydrates.
+    do
+        local db_check, db_check_err = sql.get("app:db")
+        if db_check and not db_check_err then
+            local existing = db_check:query(
+                "SELECT started_at, ended_at FROM games WHERE id = ?", { game_id })
+            db_check:release()
+            if existing and existing[1]
+                and existing[1].started_at ~= nil
+                and existing[1].ended_at == nil then
+                -- Already-started, not-yet-ended game → rehydrate path.
+                local rstate, rerr = rehydrate_state(game_id, player_name)
+                if not rstate then
+                    logger:error("[orchestrator] rehydrate_state failed",
+                        { game_id = game_id, err = tostring(rerr) })
+                    return
+                end
+                return run_rehydrated(rstate, gm_pid)
+            end
+        end
+    end
 
     -- 3. Timing mode (D-22). Stale DAY_DURATION_*/PACING_*_MS constants deleted (D-DEV-03).
     local dev = dev_mode()

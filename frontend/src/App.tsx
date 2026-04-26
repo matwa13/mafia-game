@@ -13,6 +13,7 @@ import { NightOverlay } from "./components/NightOverlay";
 import { NightPicker } from "./components/NightPicker";
 import { BeginDayRow } from "./components/BeginDayRow";
 import { DevDrawer } from "./components/DevDrawer";
+import { ReconnectingOverlay } from "./components/ReconnectingOverlay";
 import { Button } from "./components/primitives/Button";
 
 export default function App() {
@@ -79,6 +80,9 @@ export default function App() {
       {phase === "night" && <BeginDayRow />}
       <LastWordsCardWrapper />
       {phase === "ended" && <EndGameBanner />}
+      {/* Phase 5 D-RH-06: rendered at root so it overlays everything during
+          the WS-close → reconnect window. Self-gates on game.rehydrating. */}
+      <ReconnectingOverlay />
     </div>
   );
 }

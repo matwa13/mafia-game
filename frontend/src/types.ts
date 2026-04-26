@@ -47,6 +47,9 @@ export interface GameState {
   // Phase 5 — dev-mode flag + last seed (D-SD-03).
   devMode: boolean;
   seed: number | null;
+  // Phase 5 D-RH-06 — true between WS close (mid-game) and the first
+  // post-reconnect game_state_changed; drives ReconnectingOverlay.
+  rehydrating: boolean;
 }
 
 /** Phase 5 D-SD-03: bootstrap dev-mode flag from relay plugin on WS connect. */
