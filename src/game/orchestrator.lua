@@ -6,7 +6,6 @@
 -- D-12: game.started reply shape to driver.
 -- D-14: helpers stay inline until >80 lines (Phase 2 scope).
 -- D-20: orchestrator sole writer of messages (Plans 03/04 enforce).
--- D-22: MAFIA_DEV_MODE -> state.day_duration / state.pacing.
 -- Plan 02 scope: INIT only. Plan 03 adds Night/Day, Plan 04 adds Vote/Win/Shutdown.
 
 local logger = require("logger"):named("orchestrator")
@@ -19,11 +18,6 @@ local pe = require("pe")  -- Phase 1 D-11 precedent: yaml imports pe -> app.lib:
 local sampler      = require("sampler")
 local persona_pool = require("persona_pool")
 local persona      = require("persona")
-
-local DAY_DURATION_PROD = "60s"
-local DAY_DURATION_DEV  = "3s"
-local PACING_PROD_MS    = 500
-local PACING_DEV_MS     = 100
 
 local function dev_mode()
     return env.get("MAFIA_DEV_MODE") == "1"
@@ -104,6 +98,51 @@ local function persist_roles(game_id, roles, player_slot)
     db:release()
     if commit_err then return nil, "commit: " .. tostring(commit_err) end
     return true
+end
+
+-- Persist rendered persona blobs to players.persona_blob (D-RH-03 precondition).
+-- Replicates spawn_npcs partner_name resolution byte-for-byte so SHA256 matches on respawn.
+-- player_name is state.player_name (used when the player is a mafia partner).
+local function persist_persona_blobs(game_id, slot_persona, roles, player_slot, roster_names_arr, player_name)
+    local db, err = sql.get("app:db")
+    if err or not db then return nil, "sql.get: " .. tostring(err) end
+    for slot = 1, 6 do
+        if slot ~= player_slot and slot_persona[slot] then
+            local p = slot_persona[slot]
+            -- replicate spawn_npcs partner_name logic exactly
+            local partner_name = nil
+            if roles[slot] == "mafia" then
+                for s2 = 1, 6 do
+                    if s2 ~= slot and roles[s2] == "mafia" then
+                        if s2 == player_slot then
+                            partner_name = (roster_names_arr and roster_names_arr[player_slot]) or player_name or "You"
+                        elseif slot_persona[s2] then
+                            partner_name = slot_persona[s2].name
+                        end
+                        break
+                    end
+                end
+            end
+            local persona_args = {
+                archetype            = p.archetype,
+                name                 = p.name,
+                voice_quirk          = p.voice_quirk,
+                canonical_utterances = p.canonical_utterances or {},
+                role                 = roles[slot],
+                partner_name         = partner_name,
+                roster_names         = roster_names_arr or {},
+                rules_text           = persona.RULES,
+            }
+            local blob = tostring(persona.render_stable_block(persona_args))
+            local _, e = db:execute(
+                "UPDATE players SET persona_blob = ? WHERE game_id = ? AND slot = ?",
+                { blob, game_id, slot }
+            )
+            if e then db:release(); return nil, "update slot=" .. slot .. ": " .. tostring(e) end
+        end
+    end
+    db:release()
+    return true, nil
 end
 
 -- Renamed: spawn_npcs. Under MAFIA_NPC_MODE=stub, behaves like Phase 2.
@@ -945,13 +984,11 @@ end
 -- run_day_discussion: one speaker at a time; per-speaker cap + day-level deadline
 -- with a 1s drain so the current speaker gets to finish if the deadline fires.
 --
--- Uses `time.after(state.day_duration)` for the day-level deadline (one-shot,
+-- Uses `time.after(day_duration)` for the day-level deadline (one-shot,
 -- created ONCE per phase — Pitfall 2). Per-speaker caps are fresh per iteration.
---
--- PLAN.md verify-grep expects `channel.after(state.day_duration)`; that is a
--- stale-API reference — `channel.after` does not exist in the Wippy runtime.
+-- day_duration / pacing_ms are inlined at call site (D-DEV-03: stale constants deleted).
 -- All in-repo deadlines use `time.after(...)`. Authority: src/probes/probe.lua,
--- src/npc/test_driver.lua, src/npc/npc_test.lua (Rule 1 — using the real API).
+-- src/npc/test_driver.lua, src/npc/npc_test.lua.
 local function run_day_discussion(game_id, round, alive, player_slot, npc_pids,
                                   day_duration, pacing_ms, dev, chat_seq, inbox)
     local order = speaking_order(alive, player_slot)
@@ -1811,6 +1848,8 @@ end
 -- with PRIMARY KEY (game_id, round) — only the FIRST phase visit per round is
 -- written; subsequent visits are no-ops via INSERT OR IGNORE. WR-06's success
 -- criterion ("rounds table is written at least once per round") is met either way.
+-- UPSERT: creates row if missing (preserves started_at), always updates phase column.
+-- Fire-and-forget — no error return (callers do not inspect result).
 local function record_round_phase(game_id, round, phase)
     local db, db_err = sql.get("app:db")
     if db_err or not db then
@@ -1818,15 +1857,17 @@ local function record_round_phase(game_id, round, phase)
             { err = tostring(db_err) })
         return
     end
-    local _, exec_err = db:execute(
+    -- Create row if missing; preserve started_at from first write.
+    db:execute(
         "INSERT OR IGNORE INTO rounds (game_id, round, phase, started_at) VALUES (?, ?, ?, ?)",
         { game_id, round, phase, time.now():unix() }
     )
+    -- Always update phase so day/vote/reveal transitions are reflected.
+    db:execute(
+        "UPDATE rounds SET phase = ? WHERE game_id = ? AND round = ?",
+        { phase, game_id, round }
+    )
     db:release()
-    if exec_err then
-        logger:warn("[orchestrator] record_round_phase: insert failed",
-            { round = round, phase = phase, err = tostring(exec_err) })
-    end
 end
 
 local function run(args)
@@ -1862,12 +1903,8 @@ local function run(args)
     -- 2. trap_links so stub crashes land on our events channel (Plan 04 handles them).
     process.set_options({ trap_links = true })
 
-    -- 3. Timing mode (D-22).
+    -- 3. Timing mode (D-22). Stale DAY_DURATION_*/PACING_*_MS constants deleted (D-DEV-03).
     local dev = dev_mode()
-    -- Resolve duration/pacing into locally-typed string/integer to avoid the lint's
-    -- literal-union narrowing on the state-table constructor.
-    local day_duration_str = dev and DAY_DURATION_DEV or DAY_DURATION_PROD
-    local pacing_ms_int = dev and PACING_DEV_MS or PACING_PROD_MS
     local state = {
         game_id = game_id,
         rng_seed = rng_seed,
@@ -1875,8 +1912,6 @@ local function run(args)
         force_tie = force_tie,
         driver_pid = driver_pid,
         gm_pid = gm_pid,
-        day_duration = tostring(day_duration_str),
-        pacing_ms = tonumber(pacing_ms_int) or 500,
         round = 0,
         roles = nil,
         roster = nil,
@@ -1887,10 +1922,7 @@ local function run(args)
     -- D-02: 6 slots, all initially alive. Assigned outside the constructor so the
     -- lint infers `{[integer]: boolean}` rather than a fixed 6-element true-tuple.
     for slot = 1, 6 do state.alive[slot] = true end
-    logger:info("[orchestrator] INIT", {
-        game_id = game_id, dev_mode = dev,
-        day_duration = state.day_duration, pacing_ms = state.pacing_ms,
-    })
+    logger:info("[orchestrator] INIT", { game_id = game_id, dev_mode = dev })
 
     -- 4. Shuffle roles + persist players + update games.
     state.roles = shuffle_roles(rng_seed)
@@ -1938,6 +1970,20 @@ local function run(args)
     state.slot_persona = slot_persona
     state.roster_names = roster_names
     state.name_to_slot = name_to_slot
+
+    -- 4c. Persist persona blobs (D-RH-03 precondition; must run before spawn_npcs
+    -- so rehydration on NPC respawn can read the blob from SQL).
+    -- Only meaningful in real mode (stub mode has no persona args to render).
+    if npc_mode() == "real" then
+        local blob_ok, blob_err = persist_persona_blobs(
+            game_id, slot_persona, state.roles, player_slot, roster_names, player_name)
+        if not blob_ok then
+            logger:error("[orchestrator] persist_persona_blobs failed",
+                { err = tostring(blob_err) })
+            return
+        end
+        logger:info("[orchestrator] persona blobs persisted", { game_id = game_id })
+    end
 
     -- 5. Spawn NPCs (routes to npc or npc_stub based on MAFIA_NPC_MODE).
     local npc_pids, spawn_err = spawn_npcs(game_id, state.roles, player_slot,
@@ -2096,7 +2142,7 @@ local function run(args)
         else
             ok_day, day_err = run_day_discussion(
                 game_id, state.round, state.alive, state.player_slot, state.npc_pids,
-                state.day_duration, state.pacing_ms, dev, state.chat_seq, inbox)
+                dev and "3s" or "60s", dev and 100 or 500, dev, state.chat_seq, inbox)
         end
         if not ok_day then
             logger:error("[orchestrator] run_day_discussion failed",
