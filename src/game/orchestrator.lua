@@ -88,8 +88,24 @@ local function request_dev_snapshots(state)
         end
         -- non-reply messages dropped; this function is only called between transitions
     end
+    -- Fill identity fields from orchestrator-owned state for any slot that
+    -- didn't reply within the deadline. Two real causes of no-reply:
+    --   1. Voted-out NPCs whose process has exited (no one to answer).
+    --   2. Alive NPCs busy in a multi-second llm.generate call (their main
+    --      loop won't read dev.snapshot.request until the call returns).
+    -- Without this fill the SPA card shows "—" for name/role/alive even
+    -- though the orchestrator already knows those values. Live telemetry
+    -- (suspicion, prompt digest, last vote/pick/error) stays absent.
     for slot in pairs(pending) do
-        replies[tostring(slot)] = { slot = slot, unavailable = true }
+        local persona = state.slot_persona and state.slot_persona[slot] or nil
+        replies[tostring(slot)] = {
+            slot        = slot,
+            unavailable = true,
+            name        = (state.roster_names and state.roster_names[slot]) or (persona and persona.name) or nil,
+            role        = state.roles and state.roles[slot] or nil,
+            alive       = state.alive and state.alive[slot] == true or false,
+            archetype   = persona and persona.archetype or nil,
+        }
     end
     return replies
 end

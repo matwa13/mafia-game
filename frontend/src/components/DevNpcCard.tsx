@@ -59,10 +59,13 @@ export function DevNpcCard({ slot, npc, rosterNames }: Props) {
         </div>
       )}
 
-      {/* Unavailable */}
+      {/* Unavailable: NPC didn't reply within request_dev_snapshots' 500ms
+          deadline — process exited (voted-out NPC) or main loop blocked in
+          a multi-second LLM call. Identity is filled from orchestrator
+          state; only live telemetry is missing. */}
       {(!npc || npc.unavailable) && (
         <p className="text-xs italic" style={{ color: "var(--color-text-muted)" }}>
-          (data unavailable)
+          (no live telemetry — busy or exited)
         </p>
       )}
 
