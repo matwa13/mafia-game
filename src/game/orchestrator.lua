@@ -2049,10 +2049,22 @@ local function run(args)
     -- D-02: 6 slots, all initially alive. Assigned outside the constructor so the
     -- lint infers `{[integer]: boolean}` rather than a fixed 6-element true-tuple.
     for slot = 1, 6 do state.alive[slot] = true end
-    logger:info("[orchestrator] INIT", { game_id = game_id, dev_mode = dev })
+    logger:info("[orchestrator] INIT", {
+        game_id = game_id, dev_mode = dev,
+        -- Determinism trace (D-SD-05): emit seed type+value so two runs
+        -- with the "same" seed can be compared in logs to verify the
+        -- structural-determinism contract before any RNG is consumed.
+        rng_seed = rng_seed,
+        rng_seed_type = type(rng_seed),
+    })
 
     -- 4. Shuffle roles + persist players + update games.
     state.roles = shuffle_roles(rng_seed)
+    logger:info("[orchestrator] roles shuffled", {
+        game_id = game_id,
+        rng_seed = rng_seed,
+        roles = state.roles,
+    })
     local persist_ok, persist_err = persist_roles(game_id, state.roles, player_slot)
     if not persist_ok then
         logger:error("[orchestrator] persist_roles failed", { err = tostring(persist_err) })
@@ -2080,7 +2092,9 @@ local function run(args)
             end
         end
         logger:info("[orchestrator] personas sampled", {
-            game_id = game_id, roster = roster_names,
+            game_id = game_id,
+            rng_seed = rng_seed,
+            roster = roster_names,
         })
     else
         -- Stub mode: synthesize minimal names for audit/logs.
