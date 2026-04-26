@@ -85,6 +85,25 @@ local function lookup_game_seed_and_slot(game_id)
     }
 end
 
+-- Phase 5 resume: read rng_seed + player_slot + player_role for the SPA-driven
+-- resume handshake. player_role is needed by game_plugin to decide whether to
+-- subscribe the mafia.* event channel for side-chat. Returns nil if no row.
+local function lookup_game_resume_info(game_id)
+    local db, db_err = sql.get("app:db")
+    if db_err or not db then return nil end
+    local rows = db:query(
+        "SELECT rng_seed, player_slot, player_role FROM games WHERE id = ?",
+        { game_id }
+    )
+    db:release()
+    if not rows or not rows[1] then return nil end
+    return {
+        rng_seed = tonumber(rows[1].rng_seed),
+        player_slot = tonumber(rows[1].player_slot) or 1,
+        player_role = rows[1].player_role,
+    }
+end
+
 -- Handle one EXIT or LINK_DOWN. Dual-signal dedupe via record.handled.
 local function handle_process_event(state, event)
     if not event then return end
@@ -320,9 +339,12 @@ local function handle_orchestrator_ready(state, payload)
             { game_id = game_id })
         return
     end
-    -- Forward game.started to the driver with the full D-12 payload.
+    -- Phase 5 resume: rehydrated orchestrators reply game.resumed instead of
+    -- game.started so the SPA-driven resume handshake in game_plugin can
+    -- distinguish "fresh game" (full intro flow) from "resume" (skip intro).
+    local reply_topic = payload.rehydrated == true and "game.resumed" or "game.started"
     if type(record.driver_pid) == "string" then
-        process.send(record.driver_pid, "game.started", {
+        process.send(record.driver_pid, reply_topic, {
             game_id = game_id,
             player_role = payload.player_role,
             player_slot = payload.player_slot,
@@ -330,9 +352,86 @@ local function handle_orchestrator_ready(state, payload)
             partner_slot = payload.partner_slot,
         })
     end
-    logger:info("[game_manager] game.started forwarded", {
+    logger:info("[game_manager] " .. reply_topic .. " forwarded", {
         game_id = game_id, player_role = payload.player_role,
     })
+end
+
+-- Phase 5 resume: SPA reconnect after wippy restart. SPA's game_plugin sends
+-- game.resume with the gameId it has in memory. We respawn the orchestrator
+-- with rehydrate=true if the game is in-flight, or reply game.resume_failed
+-- so the SPA falls back to Setup.
+local function handle_game_resume(state, payload)
+    payload = payload or {}
+    local game_id = payload.game_id
+    local driver_pid = payload.driver_pid
+
+    if type(game_id) ~= "string" or game_id == "" then
+        if type(driver_pid) == "string" then
+            process.send(driver_pid, "game.resume_failed", { code = "MISSING_GAME_ID" })
+        end
+        return
+    end
+    if type(driver_pid) ~= "string" then
+        logger:error("[game_manager] game.resume missing driver_pid")
+        return
+    end
+
+    -- Case 1: orchestrator already tracked (e.g., transient WS hiccup; wippy
+    -- did not restart). Re-bind driver_pid and reply synchronously. The SPA's
+    -- existing event subscription continues to receive game events.
+    local existing = state.active_games[game_id]
+    if existing and existing.orch_pid then
+        existing.driver_pid = driver_pid
+        local info = lookup_game_resume_info(game_id)
+        process.send(driver_pid, "game.resumed", {
+            game_id = game_id,
+            player_role = info and info.player_role,
+            player_slot = (info and info.player_slot) or 1,
+        })
+        logger:info("[game_manager] game.resume: orchestrator alive, rebound driver_pid",
+            { game_id = game_id, orch_pid = tostring(existing.orch_pid) })
+        return
+    end
+
+    -- Case 2: orchestrator gone (wippy restart). Respawn if game in-flight.
+    if not check_game_in_flight(game_id) then
+        process.send(driver_pid, "game.resume_failed", { code = "NOT_IN_FLIGHT" })
+        logger:info("[game_manager] game.resume rejected: not in-flight",
+            { game_id = game_id })
+        return
+    end
+
+    local info = lookup_game_resume_info(game_id)
+    if not info or not info.rng_seed then
+        process.send(driver_pid, "game.resume_failed", { code = "NO_GAMES_ROW" })
+        return
+    end
+
+    -- Spawn with rehydrate=true. handle_orchestrator_ready will reply
+    -- game.resumed (because payload.rehydrated will be true).
+    local new_pid, spawn_err = spawn_orchestrator(
+        game_id, info.rng_seed, info.player_slot,
+        false, driver_pid, nil,
+        true  -- rehydrate=true
+    )
+    if not new_pid then
+        process.send(driver_pid, "game.resume_failed", {
+            code = "SPAWN_FAILED",
+            error = tostring(spawn_err),
+        })
+        return
+    end
+
+    state.active_games[game_id] = {
+        orch_pid = new_pid,
+        driver_pid = driver_pid,
+        handled = false,
+        started_at = time.now():unix(),
+        rehydrated = true,
+    }
+    logger:info("[game_manager] game.resume: orchestrator respawned",
+        { game_id = game_id, orch_pid = tostring(new_pid) })
 end
 
 local function run(_args)
@@ -370,6 +469,8 @@ local function run(_args)
 
             if topic == "game.start" then
                 handle_game_start(state, payload)
+            elseif topic == "game.resume" then
+                handle_game_resume(state, payload)
             elseif topic == "orchestrator.ready" then
                 handle_orchestrator_ready(state, payload)
             else
