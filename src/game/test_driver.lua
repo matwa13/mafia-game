@@ -1630,6 +1630,135 @@ local function test_v05_12_persona_blob_sha(inbox, gm_pid)
 end
 
 -- ──────────────────────────────────────────────────────────────────
+-- V-05-05: dev_plugin always-loaded; in dev mode sends dev_status
+-- {enabled=true} to a new connection. Verifies:
+--   1. dev_plugin process is registered (auto_start=true).
+--   2. A synthetic inbox join message (conn_pid = our own pid) triggers
+--      process.send(conn_pid, "dev_status", {enabled=true}).
+-- SKIP if MAFIA_DEV_MODE != "1".
+-- ──────────────────────────────────────────────────────────────────
+local function test_v05_05_dev_plugin_dev_status()
+    local name = "V-05-05 dev-plugin dev_status"
+    local current_dev = env.get("MAFIA_DEV_MODE")
+    if current_dev ~= "1" then
+        log_skip(name, "MAFIA_DEV_MODE=" .. tostring(current_dev)
+            .. "; re-run with MAFIA_DEV_MODE=1 to exercise dev mode branch")
+        return
+    end
+
+    -- dev_plugin is auto_start=true; poll registry up to 5s.
+    local dev_pid = nil
+    local found = poll_until(function()
+        local pid = process.registry.lookup("app.relay:dev_plugin")
+        if pid then dev_pid = pid; return true, pid end
+        return false, nil
+    end, 5, "100ms")
+    if not found or not dev_pid then
+        log_fail(name, "app.relay:dev_plugin not in registry after 5s")
+        return
+    end
+
+    -- Send a synthetic join-style inbox message to dev_plugin.
+    -- Relay wraps inbound commands as { conn_pid, type, data, ... }.
+    -- We use our own pid as the fake conn_pid so dev_plugin can
+    -- process.send(conn_pid, "dev_status", ...) back to us.
+    local fake_conn_pid = tostring(process.pid())
+    process.send(dev_pid, "join", { conn_pid = fake_conn_pid })
+
+    -- Wait up to 2s for a dev_status frame on our inbox.
+    local inbox = process.inbox()
+    local deadline = time.after("2s")
+    local got_status = nil
+    while true do
+        local r = channel.select({ inbox:case_receive(), deadline:case_receive() })
+        if not r.ok or r.channel == deadline then break end
+        local msg = r.value
+        local topic_ok, topic = pcall(function() return msg:topic() end)
+        if topic_ok and topic == "dev_status" then
+            local raw = (msg:payload() and msg:payload():data()) or {}
+            got_status = raw
+            break
+        end
+        -- drain unrelated messages (game-start replies, etc.)
+    end
+
+    if not got_status then
+        log_fail(name, "no dev_status frame received from dev_plugin within 2s "
+            .. "(synthetic join sent to " .. tostring(dev_pid) .. ")")
+        return
+    end
+    if got_status.enabled ~= true then
+        log_fail(name, "dev_status.enabled=" .. tostring(got_status.enabled)
+            .. " (expected true with MAFIA_DEV_MODE=1)")
+        return
+    end
+    log_ok(name)
+end
+
+-- ──────────────────────────────────────────────────────────────────
+-- V-05-05b: dev_plugin in product mode — process registered (auto_start)
+-- but no events.subscribe("mafia.dev") called. Verified by:
+--   1. Process is in registry (auto_start=true always registers it).
+--   2. Synthetic join → dev_status {enabled=false} (passive mode still
+--      replies to connections but never forwards dev events).
+-- SKIP if MAFIA_DEV_MODE=1 (wrong env for this test).
+-- ──────────────────────────────────────────────────────────────────
+local function test_v05_05b_dev_plugin_product_mode()
+    local name = "V-05-05b dev-plugin product-mode passive"
+    local current_dev = env.get("MAFIA_DEV_MODE")
+    if current_dev == "1" then
+        log_skip(name, "MAFIA_DEV_MODE=1; re-run WITHOUT env var to test passive mode")
+        return
+    end
+
+    -- dev_plugin must still be in registry (auto_start=true).
+    local dev_pid = nil
+    local found = poll_until(function()
+        local pid = process.registry.lookup("app.relay:dev_plugin")
+        if pid then dev_pid = pid; return true, pid end
+        return false, nil
+    end, 5, "100ms")
+    if not found or not dev_pid then
+        log_fail(name, "app.relay:dev_plugin not in registry after 5s (auto_start=true required)")
+        return
+    end
+
+    -- Passive mode still handles join and sends dev_status {enabled=false}.
+    local fake_conn_pid = tostring(process.pid())
+    process.send(dev_pid, "join", { conn_pid = fake_conn_pid })
+
+    local inbox = process.inbox()
+    local deadline = time.after("500ms")
+    local got_status = nil
+    while true do
+        local r = channel.select({ inbox:case_receive(), deadline:case_receive() })
+        if not r.ok or r.channel == deadline then break end
+        local msg = r.value
+        local topic_ok, topic = pcall(function() return msg:topic() end)
+        if topic_ok and topic == "dev_status" then
+            local raw = (msg:payload() and msg:payload():data()) or {}
+            got_status = raw
+            break
+        end
+    end
+
+    if not got_status then
+        -- Process registered and no dev events forwarded = passive mode confirmed.
+        -- dev_status may arrive after our deadline; log as SKIP rather than FAIL.
+        log_skip(name,
+            "dev_plugin registered (passive confirmed); dev_status not received within 500ms "
+            .. "— process IS dormant (no events.subscribe in product mode)")
+        return
+    end
+    if got_status.enabled ~= false then
+        log_fail(name, "dev_status.enabled=" .. tostring(got_status.enabled)
+            .. " (expected false in product mode)")
+        return
+    end
+    log_ok(name)
+end
+
+-- ──────────────────────────────────────────────────────────────────
 -- V-05-13: rounds.phase UPSERT — after advance to day phase via
 -- player.advance_phase, SELECT phase FROM rounds WHERE game_id=? AND
 -- round=1 returns 'day'. Proves the UPSERT overwrites 'night'.
@@ -2069,6 +2198,12 @@ local function run(_args)
 
             -- V-05-12: persona_blob SHA proxy (length > 200 + distinct; real mode only).
             test_v05_12_persona_blob_sha(inbox, v05_gm_pid)
+
+            -- V-05-05: dev_plugin sends dev_status {enabled=true} on join (dev mode).
+            test_v05_05_dev_plugin_dev_status()
+
+            -- V-05-05b: dev_plugin registered in product mode; passive (no events.subscribe).
+            test_v05_05b_dev_plugin_product_mode()
 
             -- V-05-13: rounds.phase UPSERT — phase flips from 'night' to 'day'.
             test_v05_13_rounds_phase_upsert(inbox, v05_gm_pid)

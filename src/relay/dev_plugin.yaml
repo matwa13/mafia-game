@@ -1,0 +1,22 @@
+version: "1.0"
+namespace: app.relay
+
+entries:
+  # Dev telemetry relay plugin — always registered (auto_start: true) but
+  # enters passive mode when MAFIA_DEV_MODE != "1". In passive mode, no
+  # events.subscribe call is made and no dev events are forwarded.
+  # D-DP-01: passive-mode runtime gate inside run().
+  # T-05-07: guard against dev events leaking to product clients.
+  - name: dev_plugin
+    kind: process.lua
+    meta:
+      type: relay.plugin
+      command_prefix: dev_
+      auto_start: true
+    source: file://dev_plugin.lua
+    method: run
+    modules:
+      - logger
+      - events
+      - channel
+      - env
