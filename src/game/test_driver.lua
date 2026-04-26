@@ -1385,6 +1385,316 @@ local function test_v04_10_rounds_written(inbox, gm_pid)
 end
 
 -- ──────────────────────────────────────────────────────────────────
+-- V-05-01: dev_mode field on game_state_changed when MAFIA_DEV_MODE=1.
+-- Subscribe to mafia.system game_state_changed, start a game, assert
+-- data.dev_mode == true on the first frame received.
+-- SKIP if MAFIA_DEV_MODE != "1" (run test with env var set).
+-- ──────────────────────────────────────────────────────────────────
+local function test_v05_01_dev_mode_field_true(inbox, gm_pid)
+    local name = "V-05-01 dev-mode-field-true"
+    local current_dev = env.get("MAFIA_DEV_MODE")
+    if current_dev ~= "1" then
+        log_skip(name, "MAFIA_DEV_MODE=" .. tostring(current_dev)
+            .. "; re-run with MAFIA_DEV_MODE=1 to exercise this branch")
+        return
+    end
+
+    -- Subscribe to system events before starting the game.
+    local sys_sub = events.subscribe("mafia.system", "game_state_changed")
+    local sys_ch = sys_sub and sys_sub:channel() or nil
+    if not sys_ch then
+        log_fail(name, "events.subscribe failed")
+        return
+    end
+
+    local payload, err = start_game(inbox, gm_pid, 23, false)
+    if not payload then
+        sys_sub:close()
+        log_fail(name, "start_game: " .. tostring(err))
+        return
+    end
+    local game_id = field(payload, "game_id")
+    if not game_id then
+        sys_sub:close()
+        log_fail(name, "no game_id")
+        return
+    end
+
+    -- Wait for a game_state_changed event for this game.
+    local deadline = time.after("10s")
+    local found_dev_mode = nil
+    while true do
+        local r = channel.select({ sys_ch:case_receive(), deadline:case_receive() })
+        if not r.ok or r.channel == deadline then
+            break
+        end
+        local evt = r.value
+        if evt then
+            local data_ok, data = pcall(function() return evt:data() end)
+            if not data_ok then
+                -- try payload path
+                data_ok, data = pcall(function() return evt:payload() and evt:payload():data() end)
+            end
+            if data_ok and type(data) == "table" then
+                local evt_game_id = data.game_id
+                if evt_game_id == game_id then
+                    found_dev_mode = data.dev_mode
+                    break
+                end
+            end
+        end
+    end
+    sys_sub:close()
+
+    if found_dev_mode == true then
+        log_ok(name)
+    elseif found_dev_mode == nil then
+        log_fail(name, "no game_state_changed event received for game=" .. game_id
+            .. " within 10s (or dev_mode field absent)")
+    else
+        log_fail(name, "data.dev_mode=" .. tostring(found_dev_mode) .. " (expected true)")
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────
+-- V-05-02: dev_mode=false when MAFIA_DEV_MODE is not set.
+-- SKIP if MAFIA_DEV_MODE=1 (wrong env for this branch; runner must
+-- execute test_driver twice — once with and once without the env var).
+-- ──────────────────────────────────────────────────────────────────
+local function test_v05_02_dev_mode_field_false(inbox, gm_pid)
+    local name = "V-05-02 dev-mode-field-false"
+    local current_dev = env.get("MAFIA_DEV_MODE")
+    if current_dev == "1" then
+        log_skip(name, "MAFIA_DEV_MODE=1; re-run without env var to exercise false branch")
+        return
+    end
+
+    local sys_sub = events.subscribe("mafia.system", "game_state_changed")
+    local sys_ch = sys_sub and sys_sub:channel() or nil
+    if not sys_ch then
+        log_fail(name, "events.subscribe failed")
+        return
+    end
+
+    local payload, err = start_game(inbox, gm_pid, 29, false)
+    if not payload then
+        sys_sub:close()
+        log_fail(name, "start_game: " .. tostring(err))
+        return
+    end
+    local game_id = field(payload, "game_id")
+    if not game_id then
+        sys_sub:close()
+        log_fail(name, "no game_id")
+        return
+    end
+
+    local deadline = time.after("10s")
+    local found_dev_mode = nil
+    local found_event = false
+    while true do
+        local r = channel.select({ sys_ch:case_receive(), deadline:case_receive() })
+        if not r.ok or r.channel == deadline then break end
+        local evt = r.value
+        if evt then
+            local data_ok, data = pcall(function() return evt:data() end)
+            if not data_ok then
+                data_ok, data = pcall(function() return evt:payload() and evt:payload():data() end)
+            end
+            if data_ok and type(data) == "table" then
+                local evt_game_id = data.game_id
+                if evt_game_id == game_id then
+                    found_event = true
+                    found_dev_mode = data.dev_mode
+                    break
+                end
+            end
+        end
+    end
+    sys_sub:close()
+
+    if not found_event then
+        log_fail(name, "no game_state_changed event for game=" .. game_id .. " within 10s")
+    elseif found_dev_mode == false then
+        log_ok(name)
+    else
+        log_fail(name, "data.dev_mode=" .. tostring(found_dev_mode) .. " (expected false)")
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────
+-- V-05-11: persona_blob populated — after game start, all 5 NPC rows in
+-- players have a non-empty persona_blob (within 5s). Stub mode has no persona
+-- args; SKIP if MAFIA_NPC_MODE != "real".
+-- ──────────────────────────────────────────────────────────────────
+local function test_v05_11_persona_blob_populated(inbox, gm_pid)
+    local name = "V-05-11 persona-blob-populated"
+    local npc_mode = env.get("MAFIA_NPC_MODE")
+    if npc_mode ~= "real" then
+        log_skip(name, "MAFIA_NPC_MODE=" .. tostring(npc_mode)
+            .. "; persona blobs only persisted in real mode")
+        return
+    end
+    local payload, err = start_game(inbox, gm_pid, 13, false)
+    if not payload then
+        log_fail(name, "start_game: " .. tostring(err))
+        return
+    end
+    local game_id = field(payload, "game_id")
+    if not game_id then
+        log_fail(name, "no game_id in game.started")
+        return
+    end
+    -- Poll until all 5 NPC rows have non-empty persona_blob (within 5s).
+    local ok = poll_until(function()
+        local n = count_rows(
+            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND slot != 1 "
+            .. "AND (persona_blob IS NULL OR persona_blob = '')",
+            { game_id })
+        return n == 0, n
+    end, 5, "200ms")
+    if ok then
+        log_ok(name)
+    else
+        local empty_n = count_rows(
+            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND slot != 1 "
+            .. "AND (persona_blob IS NULL OR persona_blob = '')",
+            { game_id })
+        log_fail(name, "still " .. tostring(empty_n)
+            .. " NPC slots with empty persona_blob after 5s for game=" .. game_id)
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────
+-- V-05-12: persona_blob SHA matches. For each NPC slot, compute
+-- SHA256 over the DB blob and compare to the hash logged by npc.lua
+-- at INIT (emitted as [PERSONA_HASH] slot=N sha=<hex> in logger).
+-- This test reads the persona_blob from SQL only; it cannot call
+-- sha256 in the wippy sandbox (no crypto module). Instead it verifies
+-- that persona_blob is a non-empty string with length > 200 for every
+-- NPC slot — a structural proxy that the blob was rendered (not blank).
+-- Full SHA comparison is done by the human-verify step per plan note.
+-- ──────────────────────────────────────────────────────────────────
+local function test_v05_12_persona_blob_sha(inbox, gm_pid)
+    local name = "V-05-12 persona-blob-sha"
+    local npc_mode = env.get("MAFIA_NPC_MODE")
+    if npc_mode ~= "real" then
+        log_skip(name, "MAFIA_NPC_MODE=" .. tostring(npc_mode)
+            .. "; persona blobs only persisted in real mode")
+        return
+    end
+    local payload, err = start_game(inbox, gm_pid, 17, false)
+    if not payload then
+        log_fail(name, "start_game: " .. tostring(err))
+        return
+    end
+    local game_id = field(payload, "game_id")
+    if not game_id then
+        log_fail(name, "no game_id")
+        return
+    end
+    -- Wait for blobs to be written.
+    local ok = poll_until(function()
+        local n = count_rows(
+            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND slot != 1 "
+            .. "AND persona_blob IS NOT NULL AND length(persona_blob) > 200",
+            { game_id })
+        return n == 5, n
+    end, 5, "200ms")
+    if not ok then
+        log_fail(name, "expected 5 NPC blobs with length>200; game=" .. game_id)
+        return
+    end
+    -- Spot-check: all blobs must be distinct (each NPC has a unique persona).
+    local db, db_err = sql.get("app:db")
+    if db_err or not db then
+        log_fail(name, "sql.get: " .. tostring(db_err))
+        return
+    end
+    local rows, q_err = db:query(
+        "SELECT COUNT(DISTINCT persona_blob) AS n FROM players WHERE game_id = ? AND slot != 1",
+        { game_id })
+    db:release()
+    if q_err or not rows or not rows[1] then
+        log_fail(name, "distinct blob query failed: " .. tostring(q_err))
+        return
+    end
+    local distinct_n = rows[1].n or 0
+    if distinct_n == 5 then
+        log_ok(name)
+    else
+        log_fail(name, "expected 5 distinct persona blobs, got " .. tostring(distinct_n)
+            .. " for game=" .. game_id
+            .. " (blob mismatch — render_stable_block args diverged)")
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────
+-- V-05-13: rounds.phase UPSERT — after advance to day phase via
+-- player.advance_phase, SELECT phase FROM rounds WHERE game_id=? AND
+-- round=1 returns 'day'. Proves the UPSERT overwrites 'night'.
+-- ──────────────────────────────────────────────────────────────────
+local function test_v05_13_rounds_phase_upsert(inbox, gm_pid)
+    local name = "V-05-13 rounds-phase-upsert"
+    local payload, err = start_game(inbox, gm_pid, 19, false)
+    if not payload then
+        log_fail(name, "start_game: " .. tostring(err))
+        return
+    end
+    local game_id = field(payload, "game_id")
+    if not game_id then
+        log_fail(name, "no game_id")
+        return
+    end
+
+    -- Wait for night_actions row (night resolved).
+    local night_ok = poll_until(function()
+        local n = count_rows(
+            "SELECT COUNT(*) AS n FROM night_actions WHERE game_id = ? AND round = 1",
+            { game_id })
+        return n >= 1, n
+    end, 20, "300ms")
+    if not night_ok then
+        log_fail(name, "night_actions never appeared for round 1")
+        return
+    end
+
+    -- Confirm rounds.phase is currently 'night' before the advance.
+    local night_row = get_row(
+        "SELECT phase FROM rounds WHERE game_id = ? AND round = 1", { game_id })
+    if not night_row or night_row.phase ~= "night" then
+        log_fail(name, "expected phase='night' before advance, got: "
+            .. tostring(night_row and night_row.phase))
+        return
+    end
+
+    -- Inject player.advance_phase to release Begin-Day gate.
+    local orch_pid = process.registry.lookup("game:" .. game_id)
+    if not orch_pid then
+        log_fail(name, "orchestrator not found for game " .. game_id)
+        return
+    end
+    process.send(orch_pid, "player.advance_phase", { round = 1 })
+
+    -- Poll until phase flips to 'day'.
+    local day_ok = poll_until(function()
+        local r = get_row(
+            "SELECT phase FROM rounds WHERE game_id = ? AND round = 1", { game_id })
+        if r and r.phase == "day" then return true, r.phase end
+        return false, nil
+    end, 10, "200ms")
+
+    if day_ok then
+        log_ok(name)
+    else
+        local r = get_row(
+            "SELECT phase FROM rounds WHERE game_id = ? AND round = 1", { game_id })
+        log_fail(name, "rounds.phase never became 'day' after player.advance_phase; got: "
+            .. tostring(r and r.phase) .. " for game=" .. game_id)
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────
 -- Main runner — sequential scenarios, then stay-alive-on-CANCEL.
 -- ──────────────────────────────────────────────────────────────────
 local function run(_args)
@@ -1514,6 +1824,35 @@ local function run(_args)
         logger:info("[test_driver] Phase 4 V-04-XX scenarios complete "
             .. "— inspect log for individual OK|FAIL|SKIP lines")
         logger:info("[test_driver] real-LLM end-to-end: run wippy + browser per 04-06-PLAN.md checkpoint")
+
+        -- ── Phase 5 V-05-XX scenarios ──────────────────────────────────
+        -- V-05-01/02: dev_mode field on game_state_changed.
+        -- V-05-11/12 require MAFIA_NPC_MODE=real (persona blobs only in real mode).
+        -- V-05-13 runs in stub mode (rounds UPSERT is mode-independent).
+        logger:info("[test_driver] starting Phase 5 V-05-XX tests")
+
+        local v05_gm_pid = process.registry.lookup("app.game:game_manager")
+        if not v05_gm_pid then
+            logger:error("[test_driver] V-05-XX: game_manager not found; skipping Phase 5 tests")
+        else
+            -- V-05-01: dev_mode=true when MAFIA_DEV_MODE=1 (SKIPs if not set).
+            test_v05_01_dev_mode_field_true(inbox, v05_gm_pid)
+
+            -- V-05-02: dev_mode=false when MAFIA_DEV_MODE unset (SKIPs if =1).
+            test_v05_02_dev_mode_field_false(inbox, v05_gm_pid)
+
+            -- V-05-11: persona_blob populated for all NPC slots (real mode only).
+            test_v05_11_persona_blob_populated(inbox, v05_gm_pid)
+
+            -- V-05-12: persona_blob SHA proxy (length > 200 + distinct; real mode only).
+            test_v05_12_persona_blob_sha(inbox, v05_gm_pid)
+
+            -- V-05-13: rounds.phase UPSERT — phase flips from 'night' to 'day'.
+            test_v05_13_rounds_phase_upsert(inbox, v05_gm_pid)
+        end
+
+        logger:info("[test_driver] Phase 5 V-05-XX scenarios complete "
+            .. "— inspect log for individual OK|FAIL|SKIP lines")
     end
 
     -- Stay alive until CANCEL (Phase 1 shape).
