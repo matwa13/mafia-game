@@ -447,6 +447,26 @@ export const useStore = create<StoreState>((set, get) => ({
       return;
     }
 
+    if (topic === "game_resume_failed") {
+      // Phase 5: server rejected the resume (game ended/missing/timeout).
+      // Reset to Setup but preserve devMode + playerName so the user does
+      // not have to re-enter them. dev_mode_changed will not refire on
+      // this connection since the conn is already registered.
+      set((s) => ({
+        game: {
+          ...initialGame,
+          devMode: s.game.devMode,
+          playerName: s.game.playerName,
+        },
+        chat: { messages: [], typing: {} },
+        vote: { ...initialVote },
+        sideChat: { ...initialSideChat, messages: [], typing: {} },
+        night: { ...initialNight },
+        dev: { roster: {}, eventTail: [], mafiaPartnerSlots: null },
+      }));
+      return;
+    }
+
     if (topic === "game_error") {
       const errorText = data.error != null
         ? String(data.error)
