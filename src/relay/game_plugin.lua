@@ -1,5 +1,7 @@
 -- src/relay/game_plugin.lua
 -- Phase 3 game relay plugin — AP2-compliant transport adapter.
+-- AP2: relay plugin holds NO game state. Audit-grep gate
+-- (scripts/audit-grep.sh line ~75) is file-scoped to this path.
 --
 -- Discovered by wippy/relay user hub; spawned per user. Holds ONLY
 -- connection bookkeeping + active-game pointer — NO roster, NO phase,

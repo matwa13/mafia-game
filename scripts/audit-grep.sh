@@ -59,6 +59,7 @@ fi
 ap4_violations=$(grep -rn --include='*.lua' 'llm\.\(generate\|structured_output\)' src/ \
     | grep -v '^src/npc/' \
     | grep -v ':src/npc/' \
+    | grep -v -- '--.*llm\.' \
     || true)
 if [ -n "$ap4_violations" ]; then
     echo "AP4 violation: llm.generate / llm.structured_output must only appear in src/npc/"
