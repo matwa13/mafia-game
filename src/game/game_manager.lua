@@ -8,6 +8,12 @@
 -- D-17: game_manager is the sole INSERT site for `games` row (orchestrator never writes games;
 --       only UPDATEs player_slot/player_role once roles resolved).
 -- Note: process.service does NOT auto-register — explicit register below.
+--
+-- Phase 6 Cut 2 (06-03): TWO CLUSTERS, ONE FILE (NO SPLIT per STRUCTURE.md L-03).
+--   Lifecycle cluster:         insert_game_row, spawn_orchestrator, handle_game_start,
+--                              handle_orchestrator_ready, shutdown_cascade_gm, run
+--   Crash-classification cluster: find_record_by_pid, mark_abandoned, handle_process_event
+-- 290 LOC across 9 functions is within L-03 threshold; run() delegates cleanly to both.
 
 local logger = require("logger"):named("game_manager")
 local time = require("time")
