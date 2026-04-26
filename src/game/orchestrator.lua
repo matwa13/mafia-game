@@ -2160,6 +2160,11 @@ local function run(args)
         emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
             state.roster_names, player_slot, "night", state.round, false)
         append_dev_event(state, "system", "game_state_changed", "/" .. game_id)
+        -- D-DP-03 (gap fix): emit dev_snapshot at night start so the DevDrawer
+        -- has roster + telemetry on first paint. Without this the drawer mounts
+        -- empty (npc undefined for every card) until end-of-night, since the
+        -- existing emit_dev_snapshot call is at the begin-day gate (line ~2210).
+        emit_dev_snapshot(state)
 
         -- Phase 4 LOOP-02: branch on player role at night.
         -- Stub path (used by test_driver V-02-XX harness): keep run_night_stub.
