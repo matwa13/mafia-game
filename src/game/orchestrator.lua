@@ -15,6 +15,7 @@ local sql = require("sql")
 local uuid = require("uuid")
 local env = require("env")
 local pe = require("pe")  -- Phase 1 D-11 precedent: yaml imports pe -> app.lib:events
+local det_rng = require("det_rng")  -- D-SD-05: same-seed-same-setup determinism
 local sampler      = require("sampler")
 local persona_pool = require("persona_pool")
 local persona      = require("persona")
@@ -143,8 +144,13 @@ end
 -- Deterministic Fisher-Yates shuffle of the canonical 2M+4V role pool across 6 slots.
 -- D-02 (amended 2026-04-22): 6 participants = 1 human (slot 1) + 5 NPC stubs (slots 2..6).
 -- Human participates in the shuffle per ROLE-02.
+-- D-SD-05 (amended): use det_rng instead of math.randomseed/math.random. The
+-- Wippy Lua runtime does not honour math.randomseed across orchestrator
+-- processes — same seed produces different shuffle results in practice
+-- (verified empirically). det_rng is a self-contained LCG that gives the
+-- intended same-seed-same-setup contract.
 local function shuffle_roles(rng_seed)
-    math.randomseed(rng_seed)
+    local rng = det_rng.new(rng_seed)
     local roles = {}
     roles[1] = "mafia"
     roles[2] = "mafia"
@@ -153,7 +159,7 @@ local function shuffle_roles(rng_seed)
     roles[5] = "villager"
     roles[6] = "villager"
     for i = 6, 2, -1 do
-        local j = math.random(i)
+        local j = rng:int(i)
         roles[i], roles[j] = roles[j], roles[i]
     end
     return roles  -- roles[slot] = "mafia"|"villager" for slot in 1..6

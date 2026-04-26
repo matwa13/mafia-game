@@ -1,15 +1,18 @@
 -- src/npc/sampler.lua
 -- Without-replacement Fisher-Yates persona sampler.
--- Pattern from src/game/orchestrator.lua:32-46 (shuffle_roles).
--- math.randomseed + math.random precedent locked in Phase 2.
+-- Pattern from src/game/orchestrator.lua shuffle_roles.
+-- D-SD-05 (amended): math.randomseed is empirically a no-op across Wippy
+-- orchestrator processes (same seed → different output). Use det_rng so
+-- same-seed runs produce the same persona-to-slot assignment.
+local det_rng = require("det_rng")
 
 -- Returns a shuffled index list [1..n] using the given integer seed.
 local function shuffled_indices(n, seed)
-    math.randomseed(seed)
+    local rng = det_rng.new(seed)
     local idx = {}
     for i = 1, n do idx[i] = i end
     for i = n, 2, -1 do
-        local j = math.random(i)
+        local j = rng:int(i)
         idx[i], idx[j] = idx[j], idx[i]
     end
     return idx

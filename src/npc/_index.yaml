@@ -33,3 +33,5 @@ entries:
   - name: sampler
     kind: library.lua
     source: file://sampler.lua
+    imports:
+      det_rng: app.lib:det_rng
