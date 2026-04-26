@@ -1049,13 +1049,30 @@ local function main_loop(state, public_sub, mafia_sub, system_sub,
                 -- D-DP-05/D-DP-06: reply with per-card telemetry. No LLM call; non-blocking.
                 -- NPCs never subscribe to "mafia.dev" — this handler only fires on unicast
                 -- process.send from the orchestrator (firewall intact per Pitfall 4).
+                --
+                -- suspicion table needs two transforms before it can cross the
+                -- WS as JSON: (1) integer slot keys → strings, otherwise the
+                -- http.ws transcoder rejects sparse arrays and closes the WS;
+                -- (2) {value, reflection_note} → {score, reasons} to match the
+                -- SPA's DevNpcSnapshot.suspicion shape (DevNpcCard reads
+                -- entry.score).
+                local suspicion_out = {}
+                for k, v in pairs(state.suspicion or {}) do
+                    if type(v) == "table" then
+                        suspicion_out[tostring(k)] = {
+                            score   = v.value,
+                            reasons = (type(v.reflection_note) == "string" and v.reflection_note ~= "")
+                                      and { v.reflection_note } or nil,
+                        }
+                    end
+                end
                 process.send(state.parent_pid, "dev.snapshot.reply", {
                     slot           = state.slot,
                     role           = state.role,
                     alive          = state.dead == false,
                     archetype      = state.persona_args and state.persona_args.archetype or nil,
                     name           = state.persona_args and state.persona_args.name or nil,
-                    suspicion      = state.suspicion,
+                    suspicion      = suspicion_out,
                     stable_sha     = state.stable_hash,
                     dynamic_tail   = state.last_dynamic_tail,
                     last_llm_error = state.last_llm_error,

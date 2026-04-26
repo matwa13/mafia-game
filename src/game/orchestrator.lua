@@ -77,7 +77,11 @@ local function request_dev_snapshots(state)
             local data = (msg:payload() and msg:payload():data()) or {}
             local dslot = data.slot
             if dslot and pending[dslot] then
-                replies[dslot] = data
+                -- Use string keys so Wippy's JSON encoder treats roster as a
+                -- map. Slot 1 is the human (no NPC), so integer keys would be
+                -- sparse {2,3,4,5,6} and the http.ws transcoder rejects sparse
+                -- arrays ("non-contiguous numeric keys"), closing the WS.
+                replies[tostring(dslot)] = data
                 pending[dslot] = nil
                 pending_count = pending_count - 1
             end
@@ -85,7 +89,7 @@ local function request_dev_snapshots(state)
         -- non-reply messages dropped; this function is only called between transitions
     end
     for slot in pairs(pending) do
-        replies[slot] = { slot = slot, unavailable = true }
+        replies[tostring(slot)] = { slot = slot, unavailable = true }
     end
     return replies
 end
