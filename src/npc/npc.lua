@@ -252,6 +252,8 @@ local function build_chat_prompt(state, is_mandatory)
         roster_names = state.roster_names,
         slot = state.slot,
     }, "chat")
+    -- D-DP-06: capture last dynamic tail for dev telemetry.
+    state.last_dynamic_tail = tail
     -- Phase 3.1: both turns are mandatory. The 2nd turn is a short reactive
     -- follow-up, not an optional skip. This eliminates the DECLINE token
     -- entirely — the LLM has no reason to emit it because it's not in the
@@ -279,6 +281,8 @@ local function build_vote_prompt(state)
         roster_names = state.roster_names,
         slot = state.slot,
     }, vote_mode)
+    -- D-DP-06: capture last dynamic tail for dev telemetry.
+    state.last_dynamic_tail = tail
     local directive = [[
 
 
@@ -436,6 +440,7 @@ local function run_chat_turn(state, round, is_mandatory)
         })
 
         if not r.ok or r.channel == deadline then
+            state.last_llm_error = { type = "TIMEOUT", context = "chat", round = round }
             persist_error(state.npc_id, "chat", { type = "TIMEOUT", message = CHAT_CAP_S }, 0)
             process.send(state.parent_pid, "chat.decline", {
                 from_slot = state.slot, round = round, reason = "timeout",
@@ -453,6 +458,7 @@ local function run_chat_turn(state, round, is_mandatory)
             end
             if rv_err then
                 local cls = classify(rv_err)
+                state.last_llm_error = { type = cls.reason or "error", context = "chat", round = round }
                 persist_error(state.npc_id, "chat", rv_err, 0)
                 process.send(state.parent_pid, "chat.decline", {
                     from_slot = state.slot, round = round,
@@ -602,6 +608,7 @@ local function run_vote_turn(state, round)
     local r = channel.select({ result_ch:case_receive(), deadline:case_receive() })
 
     if not r.ok or r.channel ~= result_ch then
+        state.last_llm_error = { type = "TIMEOUT", context = "vote", round = round }
         persist_error(state.npc_id, "vote", { type = "TIMEOUT", message = "15s cap" }, 0)
         process.send(state.parent_pid, "vote.cast", {
             from_slot = state.slot, vote_for_slot = nil,
@@ -618,6 +625,7 @@ local function run_vote_turn(state, round)
         if k == "res" then rv_res = v end
     end
     if rv_err then
+        state.last_llm_error = { type = "llm_error", context = "vote", round = round }
         persist_error(state.npc_id, "vote", rv_err, 0)
         process.send(state.parent_pid, "vote.cast", {
             from_slot = state.slot, vote_for_slot = nil,
@@ -672,6 +680,13 @@ local function run_vote_turn(state, round)
         end
     end
 
+    -- D-DP-06: capture last_vote for dev telemetry.
+    state.last_vote = {
+        round = round,
+        target_slot = vote_for_slot,
+        justification = res_reasoning,
+    }
+
     process.send(state.parent_pid, "vote.cast", {
         from_slot = state.slot,
         vote_for_slot = vote_for_slot,
@@ -715,6 +730,8 @@ local function run_night_pick(state, raw)
         roster_names = state.roster_names,
         slot = state.slot,
     }, "chat")
+    -- D-DP-06: capture last dynamic tail for dev telemetry.
+    state.last_dynamic_tail = tail
     local names_str = table.concat(living_target_names or {}, ", ")
     local slot_strs = {}
     for _, x in ipairs(living_target_slots or {}) do
@@ -736,6 +753,7 @@ local function run_night_pick(state, raw)
     local r = channel.select({ result_ch:case_receive(), deadline:case_receive() })
 
     if not r.ok or r.channel ~= result_ch then
+        state.last_llm_error = { type = "TIMEOUT", context = "night_pick", round = round }
         persist_error(state.npc_id, "night_pick", { type = "TIMEOUT", message = tostring(VOTE_CAP_S) }, 0)
         process.send(state.parent_pid, "night.pick.response", {
             from_slot = state.slot,
@@ -755,6 +773,7 @@ local function run_night_pick(state, raw)
         if k == "res" then rv_res = v end
     end
     if rv_err then
+        state.last_llm_error = { type = "llm_error", context = "night_pick", round = round }
         persist_error(state.npc_id, "night_pick", rv_err, 0)
         process.send(state.parent_pid, "night.pick.response", {
             from_slot = state.slot,
@@ -797,6 +816,14 @@ local function run_night_pick(state, raw)
         target_slot = fallback_slot
         reasoning = (reasoning ~= "" and reasoning or "out_of_range_fallback")
     end
+
+    -- D-DP-06: capture last_pick for dev telemetry.
+    state.last_pick = {
+        round = round,
+        target_slot = target_slot,
+        reasoning = reasoning,
+        confidence = confidence,
+    }
 
     process.send(state.parent_pid, "night.pick.response", {
         from_slot = state.slot,
@@ -1018,6 +1045,24 @@ local function main_loop(state, public_sub, mafia_sub, system_sub,
                     run_night_side_chat(state, raw)
                 end
 
+            elseif tp == "dev.snapshot.request" then
+                -- D-DP-05/D-DP-06: reply with per-card telemetry. No LLM call; non-blocking.
+                -- NPCs never subscribe to "mafia.dev" — this handler only fires on unicast
+                -- process.send from the orchestrator (firewall intact per Pitfall 4).
+                process.send(state.parent_pid, "dev.snapshot.reply", {
+                    slot           = state.slot,
+                    role           = state.role,
+                    alive          = state.dead == false,
+                    archetype      = state.persona_args and state.persona_args.archetype or nil,
+                    name           = state.persona_args and state.persona_args.name or nil,
+                    suspicion      = state.suspicion,
+                    stable_sha     = state.stable_hash,
+                    dynamic_tail   = state.last_dynamic_tail,
+                    last_llm_error = state.last_llm_error,
+                    last_vote      = state.last_vote,
+                    last_pick      = state.last_pick,
+                })
+
             elseif tp == "eliminated" then
                 local elim_slot = nil
                 local elim_round = 0
@@ -1181,6 +1226,11 @@ local function run(args)
         roster       = {},
         round        = 0,
         dead         = false,
+        -- D-DP-06: dev telemetry fields — populated by vote/pick/error handlers.
+        last_llm_error    = nil,
+        last_vote         = nil,
+        last_pick         = nil,
+        last_dynamic_tail = nil,
     }
 
     -- 7. Main loop.
