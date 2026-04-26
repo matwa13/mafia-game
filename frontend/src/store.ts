@@ -52,6 +52,9 @@ const initialGame: GameState = {
   discussionReady: false,
   awaitingNextDay: false,
   awaitingBeginDay: false,
+  // Phase 5 D-SD-03: bootstrapped from dev_mode_changed on WS connect.
+  devMode: false,
+  seed: null,
 };
 
 const initialVote: VoteState = {
@@ -102,6 +105,14 @@ export const useStore = create<StoreState>((set, get) => ({
 
   applyFrame: (topic: string, rawData: unknown) => {
     const data = asRecord(rawData);
+
+    // Phase 5 D-SD-03: bootstrap dev-mode flag from relay plugin on WS connect.
+    // Fires before any game starts so the SetupScreen can show the Seed input.
+    if (topic === "dev_mode_changed") {
+      const enabled = Boolean(data.enabled);
+      set((s) => ({ game: { ...s.game, devMode: enabled } }));
+      return;
+    }
 
     if (topic === "game_state_changed") {
       const roster: GameState["roster"] = {};

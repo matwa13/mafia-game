@@ -31,11 +31,13 @@ export default function App() {
   if (phase === null || phase === undefined) {
     return (
       <SetupScreen
-        onStart={(playerName) => {
+        onStart={(playerName, seed) => {
           // Persist the name on the store before sending so Start New Game
           // (D-EG-03) can re-use it without re-prompting the player.
           useStore.setState((s) => ({ game: { ...s.game, playerName } }));
-          send("game_start", { seed: 3, name: playerName });
+          const payload: { name: string; seed?: number } = { name: playerName };
+          if (seed !== undefined) payload.seed = seed;
+          send("game_start", payload);
         }}
       />
     );
@@ -76,14 +78,21 @@ export default function App() {
   );
 }
 
-function SetupScreen({ onStart }: { onStart: (name: string) => void }) {
+function SetupScreen({ onStart }: { onStart: (name: string, seed?: number) => void }) {
   const [name, setName] = useState("");
+  const [seedInput, setSeedInput] = useState("");
+  const devMode = useStore((s) => s.game.devMode);
+
   const trimmed = name.trim();
   const canStart = trimmed.length > 0 && trimmed.length <= 32;
+  const seedInvalid = devMode && seedInput !== "" && !/^\d+$/.test(seedInput);
 
   function handleStart() {
     if (!canStart) return;
-    onStart(trimmed);
+    const parsedSeed = devMode && /^\d+$/.test(seedInput.trim())
+      ? parseInt(seedInput.trim(), 10)
+      : undefined;
+    onStart(trimmed, parsedSeed);
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
@@ -125,6 +134,34 @@ function SetupScreen({ onStart }: { onStart: (name: string) => void }) {
               outlineColor: "var(--color-accent)",
             }}
           />
+          {devMode && (
+            <>
+              <label
+                htmlFor="seed-input"
+                className="text-sm"
+                style={{ color: "var(--color-text-muted)" }}
+              >
+                Seed (optional)
+              </label>
+              <input
+                id="seed-input"
+                type="text"
+                value={seedInput}
+                onChange={(e) => setSeedInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="e.g. 42 (leave empty for random)"
+                className="w-full max-w-[320px] rounded-md px-3 py-2 text-base outline-none focus-visible:ring-2"
+                style={{
+                  background: "var(--color-surface-raised)",
+                  color: "var(--color-text)",
+                  border: seedInvalid
+                    ? "1px solid var(--color-danger)"
+                    : "1px solid var(--color-border)",
+                  outlineColor: "var(--color-accent)",
+                }}
+              />
+            </>
+          )}
           <Button variant="primary" onClick={handleStart} disabled={!canStart}>
             Start new game
           </Button>

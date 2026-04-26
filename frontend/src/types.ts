@@ -44,6 +44,15 @@ export interface GameState {
   // for convenience selectors that don't want to drill into the night slice.
   playerName?: string;
   awaitingBeginDay: boolean;
+  // Phase 5 — dev-mode flag + last seed (D-SD-03).
+  devMode: boolean;
+  seed: number | null;
+}
+
+/** Phase 5 D-SD-03: bootstrap dev-mode flag from relay plugin on WS connect. */
+export interface DevModeChangedFrame {
+  type: "dev_mode_changed";
+  enabled: boolean;
 }
 
 export interface ChatMessage {
