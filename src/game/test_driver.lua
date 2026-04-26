@@ -1695,6 +1695,221 @@ local function test_v05_13_rounds_phase_upsert(inbox, gm_pid)
 end
 
 -- ──────────────────────────────────────────────────────────────────
+-- V-05-02: Two-runs-same-seed determinism.
+-- Start two games with the same payload.rng_seed (different game_ids).
+-- Assert roster display_names are identical across both runs.
+-- (D-SD-05: structural determinism — same seed → same roles, personas, turn order)
+-- ──────────────────────────────────────────────────────────────────
+local function test_v05_02_same_seed_determinism(inbox, gm_pid)
+    local name = "V-05-02 same-seed-determinism"
+    local test_seed = 42
+
+    -- Run 1.
+    local p1, err1 = start_game(inbox, gm_pid, test_seed, false)
+    if not p1 then
+        log_fail(name, "game1 start failed: " .. tostring(err1))
+        return
+    end
+    local g1 = field(p1, "game_id")
+    if not g1 then
+        log_fail(name, "no game_id for game1")
+        return
+    end
+
+    -- Run 2 with the same seed.
+    local p2, err2 = start_game(inbox, gm_pid, test_seed, false)
+    if not p2 then
+        log_fail(name, "game2 start failed: " .. tostring(err2))
+        return
+    end
+    local g2 = field(p2, "game_id")
+    if not g2 then
+        log_fail(name, "no game_id for game2")
+        return
+    end
+
+    if g1 == g2 then
+        log_fail(name, "same game_id returned for both runs (UUID collision?)")
+        return
+    end
+
+    -- Poll until both games have 6 player rows with display_name populated.
+    local ok = poll_until(function()
+        local n1 = count_rows(
+            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL",
+            { g1 })
+        local n2 = count_rows(
+            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL",
+            { g2 })
+        return n1 == 6 and n2 == 6, { n1, n2 }
+    end, 10, "200ms")
+    if not ok then
+        local n1 = count_rows(
+            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL",
+            { g1 })
+        local n2 = count_rows(
+            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL",
+            { g2 })
+        log_fail(name, string.format(
+            "player rows not ready after 10s: game1=%d game2=%d (expected 6 each)", n1, n2))
+        return
+    end
+
+    local db, db_err = sql.get("app:db")
+    if db_err or not db then
+        log_fail(name, "sql.get: " .. tostring(db_err))
+        return
+    end
+    local names1, _ = db:query(
+        "SELECT display_name, role FROM players WHERE game_id = ? ORDER BY slot", { g1 })
+    local names2, _ = db:query(
+        "SELECT display_name, role FROM players WHERE game_id = ? ORDER BY slot", { g2 })
+    db:release()
+
+    if not names1 or not names2 or #names1 ~= 6 or #names2 ~= 6 then
+        log_fail(name, string.format(
+            "expected 6 name rows each; got game1=%d game2=%d",
+            names1 and #names1 or 0, names2 and #names2 or 0))
+        return
+    end
+
+    local diffs = {}
+    for i = 1, 6 do
+        local n1_name = names1[i] and names1[i].display_name or "(nil)"
+        local n2_name = names2[i] and names2[i].display_name or "(nil)"
+        local n1_role = names1[i] and names1[i].role or "(nil)"
+        local n2_role = names2[i] and names2[i].role or "(nil)"
+        if n1_name ~= n2_name then
+            table.insert(diffs, string.format("slot %d name: %s vs %s", i, n1_name, n2_name))
+        end
+        if n1_role ~= n2_role then
+            table.insert(diffs, string.format("slot %d role: %s vs %s", i, n1_role, n2_role))
+        end
+    end
+
+    if #diffs == 0 then
+        log_ok(name)
+    else
+        log_fail(name, "seed=" .. tostring(test_seed) .. " not deterministic: "
+            .. table.concat(diffs, "; "))
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────
+-- V-05-04: MAFIA_SEED env fallback determinism.
+-- Start game with NO payload.rng_seed; verify game_manager uses MAFIA_SEED env.
+-- Two sub-checks: (a) rng_seed stored in games table equals MAFIA_SEED, and
+-- (b) two runs without payload.rng_seed produce identical roster_names (when
+--     same MAFIA_SEED is set). SKIP if MAFIA_SEED env is not set.
+-- ──────────────────────────────────────────────────────────────────
+local function test_v05_04_env_seed(inbox, gm_pid)
+    local name = "V-05-04 env-seed-fallback"
+    local env_seed_str = env.get("MAFIA_SEED")
+    if not env_seed_str or env_seed_str == "" then
+        log_skip(name, "MAFIA_SEED not set; re-run with MAFIA_SEED=<int> to exercise env fallback")
+        return
+    end
+    local expected_seed = tonumber(env_seed_str)
+    if not expected_seed then
+        log_skip(name, "MAFIA_SEED=" .. tostring(env_seed_str) .. " is non-numeric; skip")
+        return
+    end
+
+    -- Start game with rng_seed=nil (no payload override → env fallback).
+    local p1, err1 = start_game(inbox, gm_pid, nil, false)
+    if not p1 then
+        log_fail(name, "game1 start failed: " .. tostring(err1))
+        return
+    end
+    local g1 = field(p1, "game_id")
+    if not g1 then
+        log_fail(name, "no game_id for game1")
+        return
+    end
+
+    -- Assert games.rng_seed == expected_seed (confirms env fallback was used).
+    local ok_seed = poll_until(function()
+        local row = get_row("SELECT rng_seed FROM games WHERE id = ?", { g1 })
+        return row ~= nil, row
+    end, 5, "100ms")
+    if not ok_seed then
+        log_fail(name, "games row never appeared for game1=" .. g1)
+        return
+    end
+    local seed_row = get_row("SELECT rng_seed FROM games WHERE id = ?", { g1 })
+    if not seed_row then
+        log_fail(name, "games row missing for game1=" .. g1)
+        return
+    end
+    local stored_seed = tonumber(seed_row.rng_seed)
+    if stored_seed ~= expected_seed then
+        log_fail(name, string.format(
+            "games.rng_seed=%s (expected MAFIA_SEED=%s) for game1=%s",
+            tostring(stored_seed), tostring(expected_seed), g1))
+        return
+    end
+
+    -- Second run: same MAFIA_SEED, no payload override → should produce same roster.
+    local p2, err2 = start_game(inbox, gm_pid, nil, false)
+    if not p2 then
+        log_fail(name, "game2 start failed: " .. tostring(err2))
+        return
+    end
+    local g2 = field(p2, "game_id")
+    if not g2 then
+        log_fail(name, "no game_id for game2")
+        return
+    end
+
+    -- Wait for both rosters to be populated.
+    local roster_ok = poll_until(function()
+        local n1 = count_rows(
+            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL",
+            { g1 })
+        local n2 = count_rows(
+            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL",
+            { g2 })
+        return n1 == 6 and n2 == 6, { n1, n2 }
+    end, 10, "200ms")
+    if not roster_ok then
+        log_fail(name, "player rows not ready after 10s for game2=" .. g2)
+        return
+    end
+
+    local db, db_err = sql.get("app:db")
+    if db_err or not db then
+        log_fail(name, "sql.get: " .. tostring(db_err))
+        return
+    end
+    local names1, _ = db:query(
+        "SELECT display_name, role FROM players WHERE game_id = ? ORDER BY slot", { g1 })
+    local names2, _ = db:query(
+        "SELECT display_name, role FROM players WHERE game_id = ? ORDER BY slot", { g2 })
+    db:release()
+
+    if not names1 or not names2 or #names1 ~= 6 or #names2 ~= 6 then
+        log_fail(name, "expected 6 name rows each for determinism check")
+        return
+    end
+
+    local diffs = {}
+    for i = 1, 6 do
+        local n1_name = names1[i] and names1[i].display_name or "(nil)"
+        local n2_name = names2[i] and names2[i].display_name or "(nil)"
+        if n1_name ~= n2_name then
+            table.insert(diffs, string.format("slot %d: %s vs %s", i, n1_name, n2_name))
+        end
+    end
+
+    if #diffs == 0 then
+        log_ok(name)
+    else
+        log_fail(name, "MAFIA_SEED=" .. tostring(expected_seed)
+            .. " not deterministic across two runs: " .. table.concat(diffs, "; "))
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────
 -- Main runner — sequential scenarios, then stay-alive-on-CANCEL.
 -- ──────────────────────────────────────────────────────────────────
 local function run(_args)
@@ -1826,7 +2041,9 @@ local function run(_args)
         logger:info("[test_driver] real-LLM end-to-end: run wippy + browser per 04-06-PLAN.md checkpoint")
 
         -- ── Phase 5 V-05-XX scenarios ──────────────────────────────────
-        -- V-05-01/02: dev_mode field on game_state_changed.
+        -- V-05-01/V-05-02-dev: dev_mode field on game_state_changed.
+        -- V-05-02: same-seed determinism (D-SD-02, two-runs-same-seed).
+        -- V-05-04: MAFIA_SEED env fallback determinism (D-SD-01, SKIPs if unset).
         -- V-05-11/12 require MAFIA_NPC_MODE=real (persona blobs only in real mode).
         -- V-05-13 runs in stub mode (rounds UPSERT is mode-independent).
         logger:info("[test_driver] starting Phase 5 V-05-XX tests")
@@ -1838,8 +2055,14 @@ local function run(_args)
             -- V-05-01: dev_mode=true when MAFIA_DEV_MODE=1 (SKIPs if not set).
             test_v05_01_dev_mode_field_true(inbox, v05_gm_pid)
 
-            -- V-05-02: dev_mode=false when MAFIA_DEV_MODE unset (SKIPs if =1).
+            -- V-05-02 (dev-mode-field-false): dev_mode=false when MAFIA_DEV_MODE unset (SKIPs if =1).
             test_v05_02_dev_mode_field_false(inbox, v05_gm_pid)
+
+            -- V-05-02 (same-seed-determinism): two runs with same seed → identical roster.
+            test_v05_02_same_seed_determinism(inbox, v05_gm_pid)
+
+            -- V-05-04: MAFIA_SEED env fallback → games.rng_seed matches env; two runs deterministic.
+            test_v05_04_env_seed(inbox, v05_gm_pid)
 
             -- V-05-11: persona_blob populated for all NPC slots (real mode only).
             test_v05_11_persona_blob_populated(inbox, v05_gm_pid)

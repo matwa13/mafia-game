@@ -14,6 +14,7 @@ local time = require("time")
 local channel = require("channel")
 local sql = require("sql")
 local uuid = require("uuid")
+local env = require("env")
 
 -- Phase 2 Plan 04: orchestrator lifecycle dispatch (D-05 abandoned-game policy).
 --
@@ -146,7 +147,12 @@ end
 
 local function handle_game_start(state, payload)
     payload = payload or {}
-    local rng_seed = payload.rng_seed or math.random(1, 2147483647)
+    -- D-SD-02: SPA input > MAFIA_SEED env > random fallback.
+    -- D-SD-05: structural-determinism only; LLM chat text remains stochastic.
+    local env_seed = tonumber(env.get("MAFIA_SEED"))
+    local rng_seed = (payload.rng_seed ~= nil and tonumber(payload.rng_seed))
+                  or env_seed
+                  or math.random(1, 2147483647)
     local player_slot = payload.player_slot or 1
     local force_tie = payload.force_tie == true
     local driver_pid = payload.driver_pid

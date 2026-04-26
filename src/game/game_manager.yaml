@@ -2,6 +2,13 @@ version: "1.0"
 namespace: app.game
 
 entries:
+  # D-SD-01: MAFIA_SEED env.variable entry. env.get() only resolves keys
+  # declared here (env.storage.file does NOT auto-surface keys to env.get).
+  - name: mafia_seed
+    kind: env.variable
+    storage: app:env
+    variable: MAFIA_SEED
+
   - name: game_manager
     kind: process.lua
     source: file://game_manager.lua
@@ -10,6 +17,7 @@ entries:
       - time
       - sql
       - uuid
+      - env
     imports:
       pe: app.lib:events
     method: run
