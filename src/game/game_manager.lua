@@ -191,7 +191,10 @@ local function insert_game_row(game_id, rng_seed, player_slot)
 end
 
 -- Spawn one orchestrator per game.start.
-local function spawn_orchestrator(game_id, rng_seed, player_slot, force_tie, driver_pid, player_name)
+-- `rehydrate` (optional, default false) tells the orchestrator INIT path to
+-- branch into rehydrate_state instead of fresh setup. Only respawn after a
+-- mid-game crash sets it true; fresh game starts must leave it nil/false.
+local function spawn_orchestrator(game_id, rng_seed, player_slot, force_tie, driver_pid, player_name, rehydrate)
     local pid, err = process.spawn_linked_monitored("app.game:orchestrator", "app.processes:host", {
         game_id = game_id,
         rng_seed = rng_seed,
@@ -200,14 +203,16 @@ local function spawn_orchestrator(game_id, rng_seed, player_slot, force_tie, dri
         driver_pid = driver_pid,
         gm_pid = process.pid(),
         player_name = player_name,
+        rehydrate = rehydrate == true,
     })
     return pid, err
 end
 
 -- Phase 5 D-RH-01: respawn orchestrator after a crash when the game is still
--- in flight (games.ended_at IS NULL). Reuses spawn_orchestrator verbatim with
--- the persisted rng_seed; orchestrator INIT detects the existing games row
--- (started_at not null, ended_at null) and routes to rehydrate_state.
+-- in flight (games.ended_at IS NULL). Reuses spawn_orchestrator with the
+-- persisted rng_seed and the explicit `rehydrate=true` flag; orchestrator
+-- INIT routes to rehydrate_state only when that flag is set (started_at is
+-- always non-null after insert_game_row, so it cannot discriminate alone).
 -- Returns the new orchestrator pid or nil on failure.
 -- Assigned to the forward-declared `respawn_orchestrator_for_rehydrate` upvalue.
 respawn_orchestrator_for_rehydrate = function(state, game_id, prev_record)
@@ -220,7 +225,8 @@ respawn_orchestrator_for_rehydrate = function(state, game_id, prev_record)
     local driver_pid = (prev_record and prev_record.driver_pid) or nil
     local new_pid, spawn_err = spawn_orchestrator(
         game_id, seed_row.rng_seed, seed_row.player_slot,
-        false, driver_pid, nil  -- force_tie=false; player_name nil → orchestrator defaults to "You"
+        false, driver_pid, nil,  -- force_tie=false; player_name nil → orchestrator defaults to "You"
+        true  -- rehydrate=true: orchestrator INIT must enter rehydrate_state, not fresh setup
     )
     if not new_pid then
         logger:error("[game_manager] rehydrate: orchestrator respawn failed",

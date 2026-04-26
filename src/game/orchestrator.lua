@@ -2506,6 +2506,14 @@ local function run_rehydrated(rstate, gm_pid)
 
     logger:error("[orchestrator] rehydrate: FSM terminated without winner",
         { game_id = game_id, round = state.round })
+    -- Mark abandoned so game_manager.check_game_in_flight returns false and the
+    -- EXIT/LINK_DOWN handler does not loop respawning.
+    local dba, dba_err = sql.get("app:db")
+    if dba and not dba_err then
+        dba:execute("UPDATE games SET ended_at = ?, winner = ? WHERE id = ?",
+            { time.now():unix(), "abandoned", game_id })
+        dba:release()
+    end
     for _, pid in pairs(state.npc_pids) do
         process.cancel(pid, "500ms")
     end
@@ -2545,30 +2553,27 @@ local function run(args)
     -- 2. trap_links so stub crashes land on our events channel (Plan 04 handles them).
     process.set_options({ trap_links = true })
 
-    -- Phase 5 D-RH-01: detect mid-game crash respawn. If a games row exists
-    -- with started_at not null AND ended_at null, the previous orchestrator
-    -- for this game_id crashed. Branch to rehydrate_state instead of fresh INIT.
-    -- game_manager only respawns under this condition, but the check here is
-    -- belt-and-suspenders so a manual respawn (test harness) also rehydrates.
-    do
-        local db_check, db_check_err = sql.get("app:db")
-        if db_check and not db_check_err then
-            local existing = db_check:query(
-                "SELECT started_at, ended_at FROM games WHERE id = ?", { game_id })
-            db_check:release()
-            if existing and existing[1]
-                and existing[1].started_at ~= nil
-                and existing[1].ended_at == nil then
-                -- Already-started, not-yet-ended game → rehydrate path.
-                local rstate, rerr = rehydrate_state(game_id, player_name)
-                if not rstate then
-                    logger:error("[orchestrator] rehydrate_state failed",
-                        { game_id = game_id, err = tostring(rerr) })
-                    return
-                end
-                return run_rehydrated(rstate, gm_pid)
+    -- Phase 5 D-RH-01: rehydrate ONLY when game_manager explicitly flags this
+    -- spawn as a respawn after a mid-game crash. The earlier heuristic of
+    -- probing `started_at != nil AND ended_at == nil` misclassified every fresh
+    -- game as a respawn, because game_manager.insert_game_row stamps
+    -- started_at at row creation time — before the orchestrator is spawned.
+    if args.rehydrate == true then
+        local rstate, rerr = rehydrate_state(game_id, player_name)
+        if not rstate then
+            logger:error("[orchestrator] rehydrate_state failed",
+                { game_id = game_id, err = tostring(rerr) })
+            -- Mark abandoned so game_manager.check_game_in_flight returns false
+            -- and the EXIT/LINK_DOWN handler does not loop respawning.
+            local dba, dba_err = sql.get("app:db")
+            if dba and not dba_err then
+                dba:execute("UPDATE games SET ended_at = ?, winner = ? WHERE id = ?",
+                    { time.now():unix(), "abandoned", game_id })
+                dba:release()
             end
+            return
         end
+        return run_rehydrated(rstate, gm_pid)
     end
 
     -- 3. Timing mode (D-22). Stale DAY_DURATION_*/PACING_*_MS constants deleted (D-DEV-03).
