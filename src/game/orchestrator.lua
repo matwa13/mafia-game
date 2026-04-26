@@ -6,7 +6,6 @@
 -- D-12: game.started reply shape to driver.
 -- D-14: helpers stay inline until >80 lines (Phase 2 scope).
 -- D-20: orchestrator sole writer of messages (Plans 03/04 enforce).
--- D-22: MAFIA_DEV_MODE -> state.day_duration / state.pacing.
 -- Plan 02 scope: INIT only. Plan 03 adds Night/Day, Plan 04 adds Vote/Win/Shutdown.
 
 local logger = require("logger"):named("orchestrator")
@@ -16,17 +15,122 @@ local sql = require("sql")
 local uuid = require("uuid")
 local env = require("env")
 local pe = require("pe")  -- Phase 1 D-11 precedent: yaml imports pe -> app.lib:events
+local det_rng = require("det_rng")  -- D-SD-05: same-seed-same-setup determinism
 local sampler      = require("sampler")
 local persona_pool = require("persona_pool")
 local persona      = require("persona")
 
-local DAY_DURATION_PROD = "60s"
-local DAY_DURATION_DEV  = "3s"
-local PACING_PROD_MS    = 500
-local PACING_DEV_MS     = 100
-
 local function dev_mode()
     return env.get("MAFIA_DEV_MODE") == "1"
+end
+
+-- D-DP-10: ring buffer of recent {scope, kind, path, ts} records.
+-- Populated on every pe.publish_event / pe.publish_dev_event call site via
+-- append_dev_event(state, ...). Capacity hard-capped at 20 (oldest overwritten).
+-- CONSTRAINT: call request_dev_snapshots only when inbox is otherwise idle
+-- (between phase transitions). The FSM is structured this way already.
+local DEV_EVENT_TAIL_CAP = 20
+
+local function append_dev_event(state, scope, kind, path)
+    -- 1-based slot; modular index wraps at DEV_EVENT_TAIL_CAP.
+    local idx = (state.dev_event_tail_idx % DEV_EVENT_TAIL_CAP) + 1
+    state.dev_event_tail[idx] = {
+        scope = scope, kind = kind, path = path, ts = os.time(),
+    }
+    state.dev_event_tail_idx = state.dev_event_tail_idx + 1
+end
+
+-- Returns the ring buffer as a chronologically-ordered array (oldest → newest).
+local function snapshot_dev_event_tail(state)
+    local out = {}
+    local total = state.dev_event_tail_idx
+    if total == 0 then return out end
+    local count = math.min(total, DEV_EVENT_TAIL_CAP)
+    local start = (total - count) % DEV_EVENT_TAIL_CAP
+    for i = 0, count - 1 do
+        local slot = ((start + i) % DEV_EVENT_TAIL_CAP) + 1
+        out[#out + 1] = state.dev_event_tail[slot]
+    end
+    return out
+end
+
+-- D-DP-05: collect per-NPC telemetry via unicast process.send.
+-- Mirrors gather_readiness pattern (lines ~163-181): 500ms deadline, marks
+-- missing slots as {slot, unavailable=true}. Only call between phase transitions.
+local function request_dev_snapshots(state)
+    local cap = "500ms"
+    local replies = {}
+    local pending = {}
+    for slot, pid in pairs(state.npc_pids or {}) do
+        process.send(pid, "dev.snapshot.request", { round = state.round, phase = state.phase })
+        pending[slot] = true
+    end
+    local inbox = process.inbox()
+    local deadline = time.after(cap)
+    local pending_count = 0
+    for _ in pairs(pending) do pending_count = pending_count + 1 end
+    while pending_count > 0 do
+        local r = channel.select({ inbox:case_receive(), deadline:case_receive() })
+        if not r.ok or r.channel ~= inbox then break end
+        local msg = r.value
+        local topic_ok, topic = pcall(function() return msg:topic() end)
+        if topic_ok and topic == "dev.snapshot.reply" then
+            local data = (msg:payload() and msg:payload():data()) or {}
+            local dslot = data.slot
+            if dslot and pending[dslot] then
+                -- Use string keys so Wippy's JSON encoder treats roster as a
+                -- map. Slot 1 is the human (no NPC), so integer keys would be
+                -- sparse {2,3,4,5,6} and the http.ws transcoder rejects sparse
+                -- arrays ("non-contiguous numeric keys"), closing the WS.
+                replies[tostring(dslot)] = data
+                pending[dslot] = nil
+                pending_count = pending_count - 1
+            end
+        end
+        -- non-reply messages dropped; this function is only called between transitions
+    end
+    -- Fill identity fields from orchestrator-owned state for any slot that
+    -- didn't reply within the deadline. Two real causes of no-reply:
+    --   1. Voted-out NPCs whose process has exited (no one to answer).
+    --   2. Alive NPCs busy in a multi-second llm.generate call (their main
+    --      loop won't read dev.snapshot.request until the call returns).
+    -- Without this fill the SPA card shows "—" for name/role/alive even
+    -- though the orchestrator already knows those values. Live telemetry
+    -- (suspicion, prompt digest, last vote/pick/error) stays absent.
+    for slot in pairs(pending) do
+        local persona = state.slot_persona and state.slot_persona[slot] or nil
+        replies[tostring(slot)] = {
+            slot        = slot,
+            unavailable = true,
+            name        = (state.roster_names and state.roster_names[slot]) or (persona and persona.name) or nil,
+            role        = state.roles and state.roles[slot] or nil,
+            alive       = state.alive and state.alive[slot] == true or false,
+            archetype   = persona and persona.archetype or nil,
+        }
+    end
+    return replies
+end
+
+-- D-DP-03/D-DP-06: emit a dev.snapshot event after each phase transition.
+-- Collects NPC telemetry, aggregates roster + mafia_slots + event_tail.
+local function emit_dev_snapshot(state)
+    if not dev_mode() then return end
+    local roster = request_dev_snapshots(state)
+    local mafia_slots = {}
+    for s, r in pairs(state.roles or {}) do
+        if r == "mafia" then mafia_slots[#mafia_slots + 1] = s end
+    end
+    table.sort(mafia_slots)
+    pe.publish_dev_event("snapshot", "/" .. state.game_id, {
+        game_id     = state.game_id,
+        seed        = state.rng_seed,
+        round       = state.round,
+        phase       = state.phase,
+        mafia_slots = mafia_slots,
+        roster      = roster,
+        event_tail  = snapshot_dev_event_tail(state),
+    })
+    append_dev_event(state, "dev", "snapshot", "/" .. state.game_id)
 end
 
 -- MAFIA_NPC_MODE routing (D-08): "real" (default) or "stub". Phase 2 test_driver
@@ -40,8 +144,13 @@ end
 -- Deterministic Fisher-Yates shuffle of the canonical 2M+4V role pool across 6 slots.
 -- D-02 (amended 2026-04-22): 6 participants = 1 human (slot 1) + 5 NPC stubs (slots 2..6).
 -- Human participates in the shuffle per ROLE-02.
+-- D-SD-05 (amended): use det_rng instead of math.randomseed/math.random. The
+-- Wippy Lua runtime does not honour math.randomseed across orchestrator
+-- processes — same seed produces different shuffle results in practice
+-- (verified empirically). det_rng is a self-contained LCG that gives the
+-- intended same-seed-same-setup contract.
 local function shuffle_roles(rng_seed)
-    math.randomseed(rng_seed)
+    local rng = det_rng.new(rng_seed)
     local roles = {}
     roles[1] = "mafia"
     roles[2] = "mafia"
@@ -50,7 +159,7 @@ local function shuffle_roles(rng_seed)
     roles[5] = "villager"
     roles[6] = "villager"
     for i = 6, 2, -1 do
-        local j = math.random(i)
+        local j = rng:int(i)
         roles[i], roles[j] = roles[j], roles[i]
     end
     return roles  -- roles[slot] = "mafia"|"villager" for slot in 1..6
@@ -104,6 +213,51 @@ local function persist_roles(game_id, roles, player_slot)
     db:release()
     if commit_err then return nil, "commit: " .. tostring(commit_err) end
     return true
+end
+
+-- Persist rendered persona blobs to players.persona_blob (D-RH-03 precondition).
+-- Replicates spawn_npcs partner_name resolution byte-for-byte so SHA256 matches on respawn.
+-- player_name is state.player_name (used when the player is a mafia partner).
+local function persist_persona_blobs(game_id, slot_persona, roles, player_slot, roster_names_arr, player_name)
+    local db, err = sql.get("app:db")
+    if err or not db then return nil, "sql.get: " .. tostring(err) end
+    for slot = 1, 6 do
+        if slot ~= player_slot and slot_persona[slot] then
+            local p = slot_persona[slot]
+            -- replicate spawn_npcs partner_name logic exactly
+            local partner_name = nil
+            if roles[slot] == "mafia" then
+                for s2 = 1, 6 do
+                    if s2 ~= slot and roles[s2] == "mafia" then
+                        if s2 == player_slot then
+                            partner_name = (roster_names_arr and roster_names_arr[player_slot]) or player_name or "You"
+                        elseif slot_persona[s2] then
+                            partner_name = slot_persona[s2].name
+                        end
+                        break
+                    end
+                end
+            end
+            local persona_args = {
+                archetype            = p.archetype,
+                name                 = p.name,
+                voice_quirk          = p.voice_quirk,
+                canonical_utterances = p.canonical_utterances or {},
+                role                 = roles[slot],
+                partner_name         = partner_name,
+                roster_names         = roster_names_arr or {},
+                rules_text           = persona.RULES,
+            }
+            local blob = tostring(persona.render_stable_block(persona_args))
+            local _, e = db:execute(
+                "UPDATE players SET persona_blob = ? WHERE game_id = ? AND slot = ?",
+                { blob, game_id, slot }
+            )
+            if e then db:release(); return nil, "update slot=" .. slot .. ": " .. tostring(e) end
+        end
+    end
+    db:release()
+    return true, nil
 end
 
 -- Renamed: spawn_npcs. Under MAFIA_NPC_MODE=stub, behaves like Phase 2.
@@ -905,6 +1059,7 @@ local function emit_game_state_changed(game_id, alive_map, roles_map,
     pe.publish_event("system", "game_state_changed", "/" .. game_id, {
         phase = phase or "unknown",
         round = round or 0,
+        dev_mode = dev_mode(),   -- D-DEV-04: SPA reads this to render DEV chip
         alive = alive_map,
         roster = roster,
         player_slot = player_sl,
@@ -945,13 +1100,11 @@ end
 -- run_day_discussion: one speaker at a time; per-speaker cap + day-level deadline
 -- with a 1s drain so the current speaker gets to finish if the deadline fires.
 --
--- Uses `time.after(state.day_duration)` for the day-level deadline (one-shot,
+-- Uses `time.after(day_duration)` for the day-level deadline (one-shot,
 -- created ONCE per phase — Pitfall 2). Per-speaker caps are fresh per iteration.
---
--- PLAN.md verify-grep expects `channel.after(state.day_duration)`; that is a
--- stale-API reference — `channel.after` does not exist in the Wippy runtime.
+-- day_duration / pacing_ms are inlined at call site (D-DEV-03: stale constants deleted).
 -- All in-repo deadlines use `time.after(...)`. Authority: src/probes/probe.lua,
--- src/npc/test_driver.lua, src/npc/npc_test.lua (Rule 1 — using the real API).
+-- src/npc/test_driver.lua, src/npc/npc_test.lua.
 local function run_day_discussion(game_id, round, alive, player_slot, npc_pids,
                                   day_duration, pacing_ms, dev, chat_seq, inbox)
     local order = speaking_order(alive, player_slot)
@@ -1080,7 +1233,8 @@ end
 -- wippy-lint struct-shape union issues (same pattern as run_night_stub).
 local function run_day_discussion_streaming(game_id, round, alive, player_slot, npc_pids,
                                             dev_mode_flag, chat_seq, inbox,
-                                            rng_seed, roles, slot_persona, roster_names)
+                                            rng_seed, roles, slot_persona, roster_names,
+                                            dev_state)
     -- Day discussion is now USER-DRIVEN: every living NPC speaks both
     -- mandatory turns in sequence, and the phase only transitions to VOTE
     -- when either (a) all NPCs have finished their 2 turns, or (b) the
@@ -1153,6 +1307,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
             pe.publish_event("public", "typing.started", "/" .. game_id, {
                 round = round, from_slot = slot, seq = reserved_seq,
             })
+            if dev_state then append_dev_event(dev_state, "public", "typing.started", "/" .. game_id) end
 
             process.send(npc_pid, "day.turn", {
                 round = round,
@@ -1264,6 +1419,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                 pe.publish_event("public", "typing.ended", "/" .. game_id, {
                     round = round, from_slot = slot, seq = reserved_seq,
                 })
+                if dev_state then append_dev_event(dev_state, "public", "typing.ended", "/" .. game_id) end
             end
 
             if advance_requested then break end
@@ -1281,6 +1437,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
         pe.publish_event("system", "day.discussion_ready", "/" .. game_id, {
             round = round,
         })
+        if dev_state then append_dev_event(dev_state, "system", "day.discussion_ready", "/" .. game_id) end
         logger:info("[orchestrator] discussion complete, awaiting user advance",
             { round = round })
         while not advance_requested do
@@ -1329,8 +1486,10 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
         round = round,
         reason = advance_requested and "user_advance" or "all_spoken",
     })
+    if dev_state then append_dev_event(dev_state, "system", "chat_locked", "/" .. game_id) end
     emit_game_state_changed(game_id, alive, roles, slot_persona,
         roster_names, player_slot, "vote", round, true)
+    if dev_state then append_dev_event(dev_state, "system", "game_state_changed", "/" .. game_id) end
     return true, nil
 end
 
@@ -1567,7 +1726,8 @@ end
 -- Takes explicit state fields (chat_seq, roster_names, slot_persona) instead of
 -- the state table — avoids wippy-lint struct-shape union issues.
 local function run_vote_round_llm(game_id, round, alive, roles, player_slot, npc_pids,
-                                   force_tie, inbox, chat_seq, roster_names, slot_persona)
+                                   force_tie, inbox, chat_seq, roster_names, slot_persona,
+                                   dev_state)
     -- local helper: count table entries
     local function count_map(t)
         local n = 0
@@ -1621,6 +1781,7 @@ local function run_vote_round_llm(game_id, round, alive, roles, player_slot, npc
                     vote_for_slot = raw.vote_for_slot,
                     reasoning = tostring(raw.reasoning or ""),
                 })
+                if dev_state then append_dev_event(dev_state, "public", "vote.cast.received", "/" .. game_id) end
                 if count_map(votes_by_slot) >= needed then break end
             end
         end
@@ -1678,11 +1839,14 @@ local function run_vote_round_llm(game_id, round, alive, roles, player_slot, npc
         round = round, tally = tally, per_voter = per_voter,
         top_slot = (not tied) and top_slot or nil, tied = tied,
     })
+    if dev_state then append_dev_event(dev_state, "public", "votes_revealed", "/" .. game_id) end
 
     if tied or not top_slot then
         pe.publish_event("system", "vote.tied", "/" .. game_id, { round = round, tally = tally })
+        if dev_state then append_dev_event(dev_state, "system", "vote.tied", "/" .. game_id) end
         emit_game_state_changed(game_id, alive, roles, slot_persona,
             roster_names, player_slot, "reveal", round, true)
+        if dev_state then append_dev_event(dev_state, "system", "game_state_changed", "/" .. game_id) end
         return true, nil
     end
 
@@ -1727,10 +1891,12 @@ local function run_vote_round_llm(game_id, round, alive, roles, player_slot, npc
     pe.publish_event("public", "player.eliminated", "/" .. game_id, {
         round = round, victim_slot = top_slot, cause = "lynch", revealed_role = revealed_role,
     })
+    if dev_state then append_dev_event(dev_state, "public", "player.eliminated", "/" .. game_id) end
     local victim_name = (roster_names and roster_names[top_slot]) or ("slot-" .. top_slot)
     emit_game_state_changed_elim(game_id, alive, roles, slot_persona,
         roster_names, player_slot, "reveal", round,
         top_slot, victim_name, revealed_role, "lynch")
+    if dev_state then append_dev_event(dev_state, "system", "game_state_changed", "/" .. game_id) end
 
     -- Cancel the victim NPC process so it exits cleanly.
     if top_slot ~= player_slot and victim_pid then
@@ -1811,6 +1977,8 @@ end
 -- with PRIMARY KEY (game_id, round) — only the FIRST phase visit per round is
 -- written; subsequent visits are no-ops via INSERT OR IGNORE. WR-06's success
 -- criterion ("rounds table is written at least once per round") is met either way.
+-- UPSERT: creates row if missing (preserves started_at), always updates phase column.
+-- Fire-and-forget — no error return (callers do not inspect result).
 local function record_round_phase(game_id, round, phase)
     local db, db_err = sql.get("app:db")
     if db_err or not db then
@@ -1818,15 +1986,17 @@ local function record_round_phase(game_id, round, phase)
             { err = tostring(db_err) })
         return
     end
-    local _, exec_err = db:execute(
+    -- Create row if missing; preserve started_at from first write.
+    db:execute(
         "INSERT OR IGNORE INTO rounds (game_id, round, phase, started_at) VALUES (?, ?, ?, ?)",
         { game_id, round, phase, time.now():unix() }
     )
+    -- Always update phase so day/vote/reveal transitions are reflected.
+    db:execute(
+        "UPDATE rounds SET phase = ? WHERE game_id = ? AND round = ?",
+        { phase, game_id, round }
+    )
     db:release()
-    if exec_err then
-        logger:warn("[orchestrator] record_round_phase: insert failed",
-            { round = round, phase = phase, err = tostring(exec_err) })
-    end
 end
 
 local function run(args)
@@ -1862,12 +2032,8 @@ local function run(args)
     -- 2. trap_links so stub crashes land on our events channel (Plan 04 handles them).
     process.set_options({ trap_links = true })
 
-    -- 3. Timing mode (D-22).
+    -- 3. Timing mode (D-22). Stale DAY_DURATION_*/PACING_*_MS constants deleted (D-DEV-03).
     local dev = dev_mode()
-    -- Resolve duration/pacing into locally-typed string/integer to avoid the lint's
-    -- literal-union narrowing on the state-table constructor.
-    local day_duration_str = dev and DAY_DURATION_DEV or DAY_DURATION_PROD
-    local pacing_ms_int = dev and PACING_DEV_MS or PACING_PROD_MS
     local state = {
         game_id = game_id,
         rng_seed = rng_seed,
@@ -1875,25 +2041,36 @@ local function run(args)
         force_tie = force_tie,
         driver_pid = driver_pid,
         gm_pid = gm_pid,
-        day_duration = tostring(day_duration_str),
-        pacing_ms = tonumber(pacing_ms_int) or 500,
         round = 0,
+        phase = "init",
         roles = nil,
         roster = nil,
         npc_pids = {},
         alive = {},  -- populated below to avoid literal-tuple type narrowing
         chat_seq = {},  -- per-round message counter; written by commit_chat_line
+        -- D-DP-10: ring buffer for dev snapshot event_tail.
+        dev_event_tail = {},
+        dev_event_tail_idx = 0,
     }
     -- D-02: 6 slots, all initially alive. Assigned outside the constructor so the
     -- lint infers `{[integer]: boolean}` rather than a fixed 6-element true-tuple.
     for slot = 1, 6 do state.alive[slot] = true end
     logger:info("[orchestrator] INIT", {
         game_id = game_id, dev_mode = dev,
-        day_duration = state.day_duration, pacing_ms = state.pacing_ms,
+        -- Determinism trace (D-SD-05): emit seed type+value so two runs
+        -- with the "same" seed can be compared in logs to verify the
+        -- structural-determinism contract before any RNG is consumed.
+        rng_seed = rng_seed,
+        rng_seed_type = type(rng_seed),
     })
 
     -- 4. Shuffle roles + persist players + update games.
     state.roles = shuffle_roles(rng_seed)
+    logger:info("[orchestrator] roles shuffled", {
+        game_id = game_id,
+        rng_seed = rng_seed,
+        roles = state.roles,
+    })
     local persist_ok, persist_err = persist_roles(game_id, state.roles, player_slot)
     if not persist_ok then
         logger:error("[orchestrator] persist_roles failed", { err = tostring(persist_err) })
@@ -1921,7 +2098,9 @@ local function run(args)
             end
         end
         logger:info("[orchestrator] personas sampled", {
-            game_id = game_id, roster = roster_names,
+            game_id = game_id,
+            rng_seed = rng_seed,
+            roster = roster_names,
         })
     else
         -- Stub mode: synthesize minimal names for audit/logs.
@@ -1938,6 +2117,20 @@ local function run(args)
     state.slot_persona = slot_persona
     state.roster_names = roster_names
     state.name_to_slot = name_to_slot
+
+    -- 4c. Persist persona blobs (D-RH-03 precondition; must run before spawn_npcs
+    -- so rehydration on NPC respawn can read the blob from SQL).
+    -- Only meaningful in real mode (stub mode has no persona args to render).
+    if npc_mode() == "real" then
+        local blob_ok, blob_err = persist_persona_blobs(
+            game_id, slot_persona, state.roles, player_slot, roster_names, player_name)
+        if not blob_ok then
+            logger:error("[orchestrator] persist_persona_blobs failed",
+                { err = tostring(blob_err) })
+            return
+        end
+        logger:info("[orchestrator] persona blobs persisted", { game_id = game_id })
+    end
 
     -- 5. Spawn NPCs (routes to npc or npc_stub based on MAFIA_NPC_MODE).
     local npc_pids, spawn_err = spawn_npcs(game_id, state.roles, player_slot,
@@ -1973,8 +2166,10 @@ local function run(args)
     -- Intro gate: emit phase="intro" with full roster and block until the
     -- player explicitly starts the game. No night kill, no LLM calls, no
     -- chat until the gate exits via player.start_game.
+    state.phase = "intro"
     emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
         state.roster_names, player_slot, "intro", 0, false)
+    append_dev_event(state, "system", "game_state_changed", "/" .. game_id)
 
     logger:info("[orchestrator] intro gate: waiting for player.start_game",
         { game_id = game_id })
@@ -2001,8 +2196,15 @@ local function run(args)
         -- first phase per round actually writes — that's still enough to close WR-06.
         record_round_phase(game_id, state.round, "night")
 
+        state.phase = "night"
         emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
             state.roster_names, player_slot, "night", state.round, false)
+        append_dev_event(state, "system", "game_state_changed", "/" .. game_id)
+        -- D-DP-03 (gap fix): emit dev_snapshot at night start so the DevDrawer
+        -- has roster + telemetry on first paint. Without this the drawer mounts
+        -- empty (npc undefined for every card) until end-of-night, since the
+        -- existing emit_dev_snapshot call is at the begin-day gate (line ~2210).
+        emit_dev_snapshot(state)
 
         -- Phase 4 LOOP-02: branch on player role at night.
         -- Stub path (used by test_driver V-02-XX harness): keep run_night_stub.
@@ -2049,6 +2251,8 @@ local function run(args)
         pe.publish_event("system", "night.ready_for_day", "/" .. game_id, {
             round = state.round,
         })
+        append_dev_event(state, "system", "night.ready_for_day", "/" .. game_id)
+        emit_dev_snapshot(state)
         logger:info("[orchestrator] night resolved, awaiting begin-day",
             { round = state.round })
         while true do
@@ -2072,6 +2276,7 @@ local function run(args)
         -- victim ("ALICE WAS ELIMINATED"). Without this, the store falls back
         -- to String(victim_slot) and renders "2 WAS ELIMINATED".
         -- night_result is the victim_slot returned by run_night_stub.
+        state.phase = "day"
         local night_victim_slot = night_result
         if type(night_victim_slot) == "number" and state.roster_names then
             local vname = state.roster_names[night_victim_slot] or ("slot-" .. night_victim_slot)
@@ -2086,17 +2291,19 @@ local function run(args)
             emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
                 state.roster_names, player_slot, "day", state.round, false)
         end
+        append_dev_event(state, "system", "game_state_changed", "/" .. game_id)
 
         local ok_day, day_err
         if npc_mode() == "real" then
             ok_day, day_err = run_day_discussion_streaming(
                 game_id, state.round, state.alive, state.player_slot, state.npc_pids,
                 dev, state.chat_seq, inbox,
-                state.rng_seed, state.roles, state.slot_persona, state.roster_names)
+                state.rng_seed, state.roles, state.slot_persona, state.roster_names,
+                state)
         else
             ok_day, day_err = run_day_discussion(
                 game_id, state.round, state.alive, state.player_slot, state.npc_pids,
-                state.day_duration, state.pacing_ms, dev, state.chat_seq, inbox)
+                dev and "3s" or "60s", dev and 100 or 500, dev, state.chat_seq, inbox)
         end
         if not ok_day then
             logger:error("[orchestrator] run_day_discussion failed",
@@ -2107,15 +2314,19 @@ local function run(args)
         -- D-SCH-02: record vote phase visit (no-op due to PK if earlier phase wrote).
         record_round_phase(game_id, state.round, "vote")
 
+        state.phase = "vote"
         emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
             state.roster_names, player_slot, "vote", state.round, false)
+        append_dev_event(state, "system", "game_state_changed", "/" .. game_id)
+        emit_dev_snapshot(state)
 
         local ok_vote, vote_err
         if npc_mode() == "real" then
             ok_vote, vote_err = run_vote_round_llm(
                 game_id, state.round, state.alive, state.roles,
                 state.player_slot, state.npc_pids, state.force_tie, inbox,
-                state.chat_seq, state.roster_names, state.slot_persona)
+                state.chat_seq, state.roster_names, state.slot_persona,
+                state)
         else
             ok_vote, vote_err = run_vote_round(
                 game_id, state.round, state.alive, state.roles,
@@ -2158,6 +2369,8 @@ local function run(args)
             pe.publish_event("system", "day.vote_complete", "/" .. game_id, {
                 round = state.round,
             })
+            append_dev_event(state, "system", "day.vote_complete", "/" .. game_id)
+            emit_dev_snapshot(state)
             logger:info("[orchestrator] vote round complete, awaiting user advance",
                 { round = state.round })
             while true do
@@ -2177,8 +2390,11 @@ local function run(args)
     end
 
     if winner then
+        state.phase = "ended"
         emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
             state.roster_names, player_slot, "ended", state.round, false, winner)
+        append_dev_event(state, "system", "game_state_changed", "/" .. game_id)
+        emit_dev_snapshot(state)
         shutdown_cascade(game_id, state.round, winner,
             living_mafia, living_villagers, state.npc_pids)
         return { status = "ended", winner = winner, final_round = state.round }

@@ -19,3 +19,4 @@ entries:
       - events
       - channel
       - time
+      - env

@@ -70,24 +70,63 @@ export function InterjectionInput() {
     el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
   }
 
-  if (playerDead) {
+  const renderContent = () => {
+    if (playerDead) {
+      return (
+        <>
+          <p
+            className="text-sm text-center"
+            role="status"
+            style={{ color: "var(--color-text-muted)" }}
+          >
+            You are eliminated. You can no longer participate in the discussion.
+          </p>
+          <Button
+            variant="secondary"
+            size="md"
+            disabled={!canAdvance}
+            onClick={handleAdvance}
+            aria-label="End discussion and go to vote"
+            title={!discussionReady ? "Wait until all NPCs have spoken" : undefined}
+          >
+            End discussion →
+          </Button>
+        </>
+      );
+    }
+
     return (
-      <div
-        className="flex flex-col gap-2 p-3 border-t"
-        style={{
-          borderColor: "var(--color-border)",
-          background: "var(--color-surface)",
-          position: "sticky",
-          bottom: 0,
-        }}
-      >
-        <p
-          className="text-sm text-center"
-          role="status"
-          style={{ color: "var(--color-text-muted)" }}
+      <>
+            <textarea
+              ref={textareaRef}
+              aria-label="Chat input"
+              disabled={!canSend}
+              value={text}
+              onChange={handleInput}
+              onKeyDown={handleKeyDown}
+              placeholder={placeholder}
+              rows={1}
+              className="flex-1 rounded-md px-3 py-2 text-base resize-none outline-none focus-visible:ring-2"
+              style={{
+                background: "var(--color-surface-raised)",
+                color: "var(--color-text)",
+                border: "1px solid var(--color-border)",
+                minHeight: 40,
+                maxHeight: 120,
+                overflow: "hidden",
+                outlineColor: "var(--color-accent)",
+              }}
+              maxLength={MAX_CHARS}
+            />
+        <Button
+          variant="primary"
+          size="md"
+          disabled={!canSend || !text.trim()}
+          onClick={handleSend}
+          aria-label="Send message"
         >
-          You are eliminated. You can no longer participate in the discussion.
-        </p>
+          Send
+        </Button>
         <Button
           variant="secondary"
           size="md"
@@ -98,13 +137,13 @@ export function InterjectionInput() {
         >
           End discussion →
         </Button>
-      </div>
-    );
+      </>
+    )
   }
 
   return (
     <div
-      className="flex flex-col gap-2 p-3 border-t"
+      className="flex flex-col items-center p-3 border-t"
       style={{
         borderColor: "var(--color-border)",
         background: "var(--color-surface)",
@@ -112,46 +151,9 @@ export function InterjectionInput() {
         bottom: 0,
       }}
     >
-      <textarea
-        ref={textareaRef}
-        aria-label="Chat input"
-        disabled={!canSend}
-        value={text}
-        onChange={handleInput}
-        onKeyDown={handleKeyDown}
-        placeholder={placeholder}
-        rows={1}
-        className="flex-1 rounded-md px-3 py-2 text-base resize-none outline-none focus-visible:ring-2"
-        style={{
-          background: "var(--color-surface-raised)",
-          color: "var(--color-text)",
-          border: "1px solid var(--color-border)",
-          minHeight: 40,
-          maxHeight: 120,
-          overflow: "hidden",
-          outlineColor: "var(--color-accent)",
-        }}
-        maxLength={MAX_CHARS}
-      />
-      <Button
-        variant="primary"
-        size="md"
-        disabled={!canSend || !text.trim()}
-        onClick={handleSend}
-        aria-label="Send message"
-      >
-        Send
-      </Button>
-      <Button
-        variant="secondary"
-        size="md"
-        disabled={!canAdvance}
-        onClick={handleAdvance}
-        aria-label="End discussion and go to vote"
-        title={!discussionReady ? "Wait until all NPCs have spoken" : undefined}
-      >
-        End discussion →
-      </Button>
+      <div className="flex flex-col gap-2 w-full max-w-[560px]">
+        {renderContent()}
+      </div>
     </div>
   );
 }

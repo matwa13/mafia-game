@@ -23,6 +23,8 @@ function phaseLabel(
 export function StatusBanner() {
   const game = useStore((s) => s.game);
   const { phase, round, roster, playerSlot, playerRole, partnerName, chatLocked } = game;
+  const devMode = useStore((s) => s.game.devMode);
+  const seed = useStore((s) => s.game.seed);
 
   const isDiscussionOpen = phase === "day" && !chatLocked;
 
@@ -67,6 +69,17 @@ export function StatusBanner() {
         >
           {label}
         </span>
+        {devMode && (
+          <span
+            aria-label="Dev mode active"
+            className="inline-flex items-center px-2 py-0.5 rounded-sm text-sm font-semibold border ml-2"
+            style={{ color: "var(--color-accent)", borderColor: "var(--color-accent)" }}
+          >
+            {seed != null ? (
+              <>DEV <span style={{ color: "var(--color-text-muted)", marginLeft: 4 }}>· seed={seed}</span></>
+            ) : "DEV"}
+          </span>
+        )}
       </div>
 
       {/* Center — your role */}

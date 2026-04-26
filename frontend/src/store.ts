@@ -6,6 +6,8 @@ import type {
   SideChatMessage,
   SideChatSlice,
   NightSlice,
+  DevNpcSnapshot,
+  DevEvent,
 } from "./types";
 
 interface TypingEntry {
@@ -21,12 +23,20 @@ interface ChatSlice {
   typing: Record<string, TypingEntry>;
 }
 
+// Phase 5 D-DP-09 — dev telemetry slice, firewalled from game.roster.
+interface DevSlice {
+  roster: Record<number, DevNpcSnapshot>;
+  eventTail: DevEvent[];
+  mafiaPartnerSlots: [number, number] | null;
+}
+
 interface StoreState {
   game: GameState;
   chat: ChatSlice;
   vote: VoteState;
   sideChat: SideChatSlice;
   night: NightSlice;
+  dev: DevSlice;
   send: (type: string, data: unknown) => void;
   setSend: (fn: (type: string, data: unknown) => void) => void;
   applyFrame: (topic: string, data: unknown) => void;
@@ -52,6 +62,9 @@ const initialGame: GameState = {
   discussionReady: false,
   awaitingNextDay: false,
   awaitingBeginDay: false,
+  // Phase 5 D-SD-03: bootstrapped from dev_mode_changed on WS connect.
+  devMode: false,
+  seed: null,
 };
 
 const initialVote: VoteState = {
@@ -74,6 +87,13 @@ const initialNight: NightSlice = {
   locked: false,
 };
 
+// Phase 5 D-DP-09 — dev slice initial state.
+const initialDev: DevSlice = {
+  roster: {} as Record<number, DevNpcSnapshot>,
+  eventTail: [] as DevEvent[],
+  mafiaPartnerSlots: null,
+};
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function asRecord(v: unknown): Record<string, any> {
   return (v && typeof v === "object" ? v : {}) as Record<string, any>;
@@ -85,6 +105,7 @@ export const useStore = create<StoreState>((set, get) => ({
   vote: initialVote,
   sideChat: initialSideChat,
   night: initialNight,
+  dev: initialDev,
   send: (_type: string, _data: unknown) => {
     console.warn("[store] send called before ws hook set it");
   },
@@ -102,6 +123,43 @@ export const useStore = create<StoreState>((set, get) => ({
 
   applyFrame: (topic: string, rawData: unknown) => {
     const data = asRecord(rawData);
+
+    // Phase 5 D-SD-03: bootstrap dev-mode flag from relay plugin on WS connect.
+    // Fires before any game starts so the SetupScreen can show the Seed input.
+    if (topic === "dev_mode_changed") {
+      const enabled = Boolean(data.enabled);
+      set((s) => ({ game: { ...s.game, devMode: enabled } }));
+      return;
+    }
+
+    // Phase 5 D-DP-01 — dev_status frame sent by dev_plugin on WS join.
+    if (topic === "dev_status") {
+      const enabled = Boolean(data.enabled);
+      set((s) => ({ game: { ...s.game, devMode: enabled } }));
+      return;
+    }
+
+    // Phase 5 D-DP-05 — dev_snapshot frame sent after each phase transition.
+    if (topic === "dev_snapshot") {
+      const seed = data.seed != null ? Number(data.seed) : null;
+      const rawRoster = (data.roster && typeof data.roster === "object") ? data.roster as Record<string, unknown> : {};
+      const roster: Record<number, DevNpcSnapshot> = {};
+      for (const [k, v] of Object.entries(rawRoster)) {
+        const slot = parseInt(k, 10);
+        if (Number.isFinite(slot) && v && typeof v === "object") {
+          roster[slot] = v as DevNpcSnapshot;
+        }
+      }
+      const mafiaPair = Array.isArray(data.mafia_slots) && data.mafia_slots.length === 2
+        ? [Number(data.mafia_slots[0]), Number(data.mafia_slots[1])] as [number, number]
+        : null;
+      const eventTail = Array.isArray(data.event_tail) ? data.event_tail as DevEvent[] : [];
+      set((s) => ({
+        game: { ...s.game, seed: seed ?? s.game.seed },
+        dev: { roster, eventTail, mafiaPartnerSlots: mafiaPair },
+      }));
+      return;
+    }
 
     if (topic === "game_state_changed") {
       const roster: GameState["roster"] = {};
@@ -126,6 +184,11 @@ export const useStore = create<StoreState>((set, get) => ({
         // On a new round, clear the user-gated readiness flags so last
         // round's button state doesn't bleed into this one.
         const roundChanged = nextRound != null && nextRound !== s.game.round;
+        // Phase 5 W3 fix: reset dev slice on intro phase so "Start New Game"
+        // doesn't show stale roster data — next dev_snapshot repopulates fresh.
+        const devReset = data.phase === "intro"
+          ? { roster: {}, eventTail: [], mafiaPartnerSlots: null }
+          : s.dev;
         return {
           game: {
             ...s.game,
@@ -149,6 +212,9 @@ export const useStore = create<StoreState>((set, get) => ({
             // flag would let the human click Begin Day before night resolves
             // (T-04-24).
             awaitingBeginDay: roundChanged ? false : s.game.awaitingBeginDay,
+            // Phase 5 D-DEV-04 — carry dev_mode + seed from game_state_changed frame.
+            devMode: data.dev_mode != null ? Boolean(data.dev_mode) : s.game.devMode,
+            seed: data.seed != null ? Number(data.seed) : s.game.seed,
           },
           // Reset vote state on new game state
           vote: data.phase === "vote" ? { ...initialVote } : s.vote,
@@ -159,6 +225,7 @@ export const useStore = create<StoreState>((set, get) => ({
           sideChat: roundChanged
             ? { ...initialSideChat, messages: [], typing: {} }
             : s.sideChat,
+          dev: devReset,
         };
       });
       return;

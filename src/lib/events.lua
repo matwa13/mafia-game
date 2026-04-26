@@ -26,7 +26,20 @@ local function scope_allowed(role, scope)
     return allowed[scope] == true
 end
 
+-- D-DP-05: publish_dev_event uses "mafia.dev" system name — NOT in ALLOWED_SCOPES.
+-- NPCs subscribe only to mafia.public / mafia.mafia / mafia.system; they never
+-- see mafia.dev events. Belt-and-suspenders firewall (Research Pitfall 4).
+-- D-09: this is the ONLY `events.send` path; the "mafia.dev" send is inside this
+-- module so the grep gate `grep -rn 'events.send' src/ | grep -v src/lib/events.lua`
+-- stays clean.
+local function publish_dev_event(kind, path, data)
+    data = data or {}
+    data.scope = "dev"
+    return events.send("mafia.dev", kind, path, data)
+end
+
 return {
     publish_event = publish_event,
+    publish_dev_event = publish_dev_event,
     scope_allowed = scope_allowed,
 }

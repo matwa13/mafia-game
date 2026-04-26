@@ -127,7 +127,7 @@ export function ChatTranscript({ showMafiaChat = false }: ChatTranscriptProps = 
       role="log"
       aria-live="polite"
       aria-atomic="false"
-      className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-4 p-4"
+      className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center gap-4 p-4"
       style={{ maxWidth: 720, margin: "0 auto", width: "100%" }}
     >
       {renderItems.map((item) => {

@@ -15,6 +15,7 @@ entries:
       - json
     imports:
       pe: app.lib:events
+      det_rng: app.lib:det_rng
       sampler: app.npc:sampler
       persona_pool: app.npc:persona_pool
       persona: app.npc:persona

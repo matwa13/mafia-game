@@ -21,7 +21,7 @@ export function BeginDayRow() {
 
   return (
     <div
-      className="flex flex-col gap-2 p-3 border-t"
+      className="flex flex-col items-center p-3 border-t"
       style={{
         borderColor: "var(--color-border)",
         background: "var(--color-surface)",
@@ -29,25 +29,27 @@ export function BeginDayRow() {
         bottom: 0,
       }}
     >
-      {!awaitingBeginDay && (
-        <p
-          className="text-sm text-center"
-          role="status"
-          style={{ color: "var(--color-text-muted)" }}
+      <div className="flex flex-col items-center gap-2 w-full max-w-[560px]">
+        {!awaitingBeginDay && (
+          <p
+            className="text-sm text-center"
+            role="status"
+            style={{color: "var(--color-text-muted)"}}
+          >
+            Waiting for night to resolve...
+          </p>
+        )}
+        <Button
+          variant="primary"
+          size="md"
+          disabled={!awaitingBeginDay}
+          onClick={handleBeginDay}
+          aria-label="Begin Day"
+          title={!awaitingBeginDay ? "Waiting for night to resolve" : undefined}
         >
-          Waiting for night to resolve...
-        </p>
-      )}
-      <Button
-        variant="primary"
-        size="md"
-        disabled={!awaitingBeginDay}
-        onClick={handleBeginDay}
-        aria-label="Begin Day"
-        title={!awaitingBeginDay ? "Waiting for night to resolve" : undefined}
-      >
-        Begin Day →
-      </Button>
+          Begin Day →
+        </Button>
+      </div>
     </div>
   );
 }

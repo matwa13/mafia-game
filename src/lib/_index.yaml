@@ -9,3 +9,11 @@ entries:
     source: file://events.lua
     modules:
       - events
+
+  # Deterministic LCG PRNG for structural setup (role shuffle, persona
+  # pick). Wippy's math.randomseed is empirically a no-op across processes;
+  # det_rng gives D-SD-05 same-seed-same-setup determinism without
+  # depending on the framework RNG.
+  - name: det_rng
+    kind: library.lua
+    source: file://det_rng.lua

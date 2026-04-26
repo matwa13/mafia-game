@@ -24,6 +24,7 @@ local logger = require("logger"):named("game_plugin")
 local events = require("events")
 local channel = require("channel")
 local time = require("time")
+local env = require("env")
 
 local MAX_CHAT_CHARS = 500  -- input validation clamp (Security T-03-01 V5)
 
@@ -99,6 +100,13 @@ local function run(args)
 
             if conn_pid ~= "" and not conns[conn_pid] then
                 conns[conn_pid] = { joined_at = time.now():unix() }
+                -- Phase 5 D-SD-03: bootstrap dev-mode flag to SPA before any
+                -- game starts so SetupScreen can show the Seed input immediately.
+                -- Plan 03's dev_plugin will eventually own this; for now
+                -- game_plugin sends a synthetic frame on first join.
+                forward(conn_pid, "dev_mode_changed", {
+                    enabled = env.get("MAFIA_DEV_MODE") == "1",
+                })
             end
 
             if topic == "start" then
@@ -121,7 +129,10 @@ local function run(args)
 
                     process.send(gm_pid, "game.start", {
                         driver_pid = process.pid(),
-                        seed = data.seed,
+                        -- D-SD-02: rename seed→rng_seed so game_manager's
+                        -- three-step precedence (SPA > MAFIA_SEED env > random)
+                        -- can read payload.rng_seed. tonumber handles nil safely.
+                        rng_seed = tonumber(data.seed),
                         player_slot = 1,      -- MVP: human is always slot 1 (Phase 0 hardcode)
                         force_tie = data.force_tie == true,
                         player_name = pname,

@@ -21,7 +21,16 @@ export function useGameSocket(onFrame: FrameHandler) {
         console.warn("[ws] parse failed", e);
       }
     };
-    ws.onopen = () => console.log("[ws] open");
+    ws.onopen = () => {
+      console.log("[ws] open");
+      // D-SD-03 / D-DP-01: dev_plugin only registers connections when it
+      // receives an inbound dev_* command. Without this ping the plugin
+      // never knows the SPA is connected, so dev_status never bootstraps,
+      // game.devMode stays false, and the Setup-screen seed input never
+      // renders. Empty payload — dev_plugin treats unknown dev_* commands
+      // as no-ops and only uses the conn_pid for registration.
+      ws.send(JSON.stringify({ type: "dev_hello", data: {} }));
+    };
     ws.onclose = () => console.log("[ws] close");
     ws.onerror = (e) => console.warn("[ws] error", e);
     return () => { ws.close(); wsRef.current = null; };

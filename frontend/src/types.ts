@@ -44,6 +44,15 @@ export interface GameState {
   // for convenience selectors that don't want to drill into the night slice.
   playerName?: string;
   awaitingBeginDay: boolean;
+  // Phase 5 — dev-mode flag + last seed (D-SD-03).
+  devMode: boolean;
+  seed: number | null;
+}
+
+/** Phase 5 D-SD-03: bootstrap dev-mode flag from relay plugin on WS connect. */
+export interface DevModeChangedFrame {
+  type: "dev_mode_changed";
+  enabled: boolean;
 }
 
 export interface ChatMessage {
@@ -123,4 +132,47 @@ export interface ClientFrame {
 export interface ServerFrame {
   topic: string;
   data: unknown;
+}
+
+// Phase 5 D-DP-06 — per-NPC dev telemetry snapshot card shape.
+export interface DevNpcSnapshot {
+  slot: number;
+  name?: string;
+  archetype?: string;
+  alive: boolean;
+  role: "mafia" | "villager";
+  suspicion: Record<number, { score: number; reasons?: string[] }>;
+  stable_sha?: string;
+  dynamic_tail?: string;
+  last_llm_error?: { type: string; message: string; attempt?: number } | null;
+  last_vote?: { round: number; target_slot: number; justification: string } | null;
+  last_pick?: { round: number; target_slot: number; reasoning: string; confidence?: string } | null;
+  unavailable?: boolean;
+}
+
+// Phase 5 D-DP-10 — scope-tagged event entry for the dev event tail.
+export interface DevEvent {
+  scope: "public" | "mafia" | "system" | "dev";
+  kind: string;
+  path?: string;
+  ts: number;
+  summary?: string;
+}
+
+// Phase 5 D-DP-01 — dev_status frame sent on WS join from dev_plugin in dev mode.
+export interface DevStatusFrame {
+  type: "dev_status";
+  enabled: boolean;
+}
+
+// Phase 5 D-DP-05 — dev_snapshot frame sent on every phase transition.
+export interface DevSnapshotFrame {
+  type: "dev_snapshot";
+  game_id: string;
+  seed: number;
+  round: number;
+  phase: "intro" | "night" | "day" | "vote" | "reveal" | "ended";
+  mafia_slots: [number, number];
+  roster: Record<number, DevNpcSnapshot>;
+  event_tail: DevEvent[];
 }
