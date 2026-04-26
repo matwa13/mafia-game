@@ -1,5 +1,4 @@
 import { useEffect, useRef } from "react";
-import { useStore } from "./store";
 
 export type FrameHandler = (topic: string, data: unknown) => void;
 
@@ -32,19 +31,7 @@ export function useGameSocket(onFrame: FrameHandler) {
       // as no-ops and only uses the conn_pid for registration.
       ws.send(JSON.stringify({ type: "dev_hello", data: {} }));
     };
-    ws.onclose = () => {
-      console.log("[ws] close");
-      // Phase 5 D-RH-06: if a game is in progress when the WS closes,
-      // flip game.rehydrating so ReconnectingOverlay mounts. Cleared on
-      // first post-reconnect game_state_changed (see store.ts).
-      const s = useStore.getState();
-      const phase = s.game.phase;
-      if (phase != null && phase !== "ended" && s.game.gameId != null) {
-        useStore.setState((st) => ({
-          game: { ...st.game, rehydrating: true },
-        }));
-      }
-    };
+    ws.onclose = () => console.log("[ws] close");
     ws.onerror = (e) => console.warn("[ws] error", e);
     return () => { ws.close(); wsRef.current = null; };
   }, []);

@@ -81,23 +81,6 @@ local function run(args)
         if mafia_chat_sub then mafia_chat_sub:close(); mafia_chat_sub = nil; mafia_chat_ch = nil end
     end
 
-    -- Phase 5 D-RH-01 / RESEARCH.md Pitfall 5: when the orchestrator is
-    -- respawned mid-game (rehydration), active.orch_pid points at the dead
-    -- pid and process.send silently drops. Re-look-up via process.registry
-    -- before each player.* dispatch; the orchestrator re-registers under
-    -- the same "game:<game_id>" key on respawn.
-    local function refresh_orch_pid()
-        if not (active and active.game_id) then return end
-        local fresh = process.registry.lookup("game:" .. active.game_id)
-        if fresh and fresh ~= active.orch_pid then
-            logger:info("[game_plugin] orchestrator pid refreshed after rehydration",
-                { game_id = active.game_id,
-                  old_pid = tostring(active.orch_pid),
-                  new_pid = tostring(fresh) })
-            active.orch_pid = fresh
-        end
-    end
-
     logger:info("[game_plugin] started", { user_id = user_id })
 
     while true do
@@ -210,7 +193,6 @@ local function run(args)
             elseif topic == "chat_send" and active then
                 -- Override from_slot with server-known player_slot (Spoofing T-03-01).
                 -- Clamp text length (Input Validation V5).
-                refresh_orch_pid()
                 local text = tostring(data.text or "")
                 if #text > MAX_CHAT_CHARS then text = text:sub(1, MAX_CHAT_CHARS) end
                 if text ~= "" then
@@ -225,7 +207,6 @@ local function run(args)
             elseif topic == "vote_cast" and active then
                 -- Override from_slot with server-known player_slot (Spoofing).
                 -- Clamp vote_for_slot to a sane range (V5).
-                refresh_orch_pid()
                 local vfs = tonumber(data.vote_for_slot)
                 if vfs and (vfs < 1 or vfs > 6) then vfs = nil end
                 process.send(active.orch_pid, "vote.cast", {
@@ -241,7 +222,6 @@ local function run(args)
                 -- abort the in-flight NPC turn and exit to the vote phase.
                 -- No from_slot override / no clamp needed — payload carries
                 -- no user-supplied data beyond the intent signal.
-                refresh_orch_pid()
                 process.send(active.orch_pid, "player.advance_phase", {
                     round = tonumber(data.round) or 0,
                 })
@@ -250,7 +230,6 @@ local function run(args)
                 -- LOOP-02 (Mafia-human branch): human Mafia locks the kill target.
                 -- Override from_slot with server-known player_slot (Spoofing T-04-01).
                 -- Clamp target_slot to 1..6 (V5 input validation, mirrors vote_cast clamping).
-                refresh_orch_pid()
                 local target = tonumber(data.target_slot)
                 if target and target >= 1 and target <= 6 then
                     process.send(active.orch_pid, "player.night_pick", {
@@ -264,7 +243,6 @@ local function run(args)
                 -- LOOP-03: human Mafia sends a side-chat line. Mirrors chat_send: server overrides
                 -- from_slot, clamps text to MAX_CHAT_CHARS (500). Orchestrator decides scope='mafia'
                 -- when committing — plugin holds no scope state.
-                refresh_orch_pid()
                 local text = tostring(data.text or "")
                 if #text > MAX_CHAT_CHARS then text = text:sub(1, MAX_CHAT_CHARS) end
                 if text ~= "" then
@@ -280,7 +258,6 @@ local function run(args)
                 -- existing player.advance_phase orchestrator handler (Plan 04 makes the
                 -- night-side gate listen for the same topic). Dead-player guard does NOT
                 -- apply: dead human can still advance the phase (CLAUDE.md flow invariant).
-                refresh_orch_pid()
                 process.send(active.orch_pid, "player.advance_phase", {
                     round = tonumber(data.round) or 0,
                 })
@@ -288,7 +265,6 @@ local function run(args)
             elseif topic == "start_game" and active then
                 -- User clicked "Start game" on the intro screen. Unblocks the
                 -- orchestrator's intro gate; the FSM enters Night 1.
-                refresh_orch_pid()
                 process.send(active.orch_pid, "player.start_game", {})
 
             elseif not active then

@@ -65,9 +65,6 @@ const initialGame: GameState = {
   // Phase 5 D-SD-03: bootstrapped from dev_mode_changed on WS connect.
   devMode: false,
   seed: null,
-  // Phase 5 D-RH-06: set true on WS close (mid-game), cleared on first
-  // post-reconnect game_state_changed.
-  rehydrating: false,
 };
 
 const initialVote: VoteState = {
@@ -218,9 +215,6 @@ export const useStore = create<StoreState>((set, get) => ({
             // Phase 5 D-DEV-04 — carry dev_mode + seed from game_state_changed frame.
             devMode: data.dev_mode != null ? Boolean(data.dev_mode) : s.game.devMode,
             seed: data.seed != null ? Number(data.seed) : s.game.seed,
-            // Phase 5 D-RH-06: any game_state_changed for the active game
-            // signals the orchestrator is back online → clear the overlay.
-            rehydrating: false,
           },
           // Reset vote state on new game state
           vote: data.phase === "vote" ? { ...initialVote } : s.vote,
