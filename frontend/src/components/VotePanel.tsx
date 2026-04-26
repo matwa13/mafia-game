@@ -43,7 +43,7 @@ export function VotePanel() {
 
   return (
     <div
-      className="flex-1 flex flex-col items-center gap-6 p-6"
+      className="flex-1 flex flex-col items-center gap-6 p-6 overflow-y-auto"
       style={{ color: "var(--color-text)" }}
     >
       <h2 className="text-lg font-semibold">VOTE — DAY {round}</h2>
@@ -129,7 +129,7 @@ export function VotePanel() {
 
       {/* Your vote selector — only for living player, pre-reveal */}
       {!playerDead && !voted && !vote.revealed && (
-        <div className="flex flex-col gap-3 w-full max-w-[480px]">
+        <div className="flex flex-col gap-3 w-full max-w-[560px]">
           <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>
             Your vote:
           </p>
