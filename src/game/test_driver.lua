@@ -2364,6 +2364,72 @@ local function test_v05_04_env_seed(inbox, gm_pid)
 end
 
 -- ──────────────────────────────────────────────────────────────────
+-- V-05-10: RSS soak — 10 consecutive game cycles in stub mode.
+-- Each cycle uses a distinct seed (1000 + i) to avoid cache aliasing
+-- (D-RR-02). Driver logs an instructive line at start so the human can
+-- sample RSS via `pgrep -f "wippy run"` + `ps -o rss= -p <pid>` before
+-- and after the loop (D-RR-04 acceptance: <10MB AND <5% growth).
+--
+-- Stub-mode gate per D-RR-03: in real-LLM mode, Bug #3 (rare voting
+-- hang) can trigger; the audited path is stub mode where the orchestrator
+-- + NPC + relay teardown are exercised without LLM variance.
+-- ──────────────────────────────────────────────────────────────────
+local function test_v05_10_rss_soak(inbox, gm_pid)
+    local name = "V-05-10 RSS soak (10 games, stub mode)"
+
+    -- Stub-mode gate (D-RR-03): bug surface for real-LLM mode is documented
+    -- as a manual procedure in 05-06-PLAN.md.
+    local npc_mode = env.get("MAFIA_NPC_MODE") or ""
+    if npc_mode ~= "stub" then
+        log_skip(name, "requires MAFIA_NPC_MODE=stub (got '" .. npc_mode .. "')")
+        return
+    end
+
+    -- Wippy sandbox does not expose the OS PID via process.* API
+    -- (Phase 01 P05 lesson: os.* is stripped). Direct the human to
+    -- pgrep for the parent wippy process.
+    logger:info("[V-05-10] BEFORE soak: sample RSS now via — "
+        .. "pgrep -f 'wippy run' | head -1 | xargs -I{} ps -o rss= -p {}")
+
+    for i = 1, 10 do
+        local seed = 1000 + i  -- distinct seeds; D-RR-02 cache-aliasing guard
+        local payload, err = start_game(inbox, gm_pid, seed, true)
+        if not payload then
+            log_fail(name, "cycle " .. i .. ": start failed — " .. tostring(err))
+            return
+        end
+        local game_id = field(payload, "game_id")
+        if not game_id then
+            log_fail(name, "cycle " .. i .. ": no game_id in game.started payload")
+            return
+        end
+
+        -- Wait for the game to end via SQL polling (game.ended is a published
+        -- event, not a driver-inbox reply; wait_for_winner is the established
+        -- pattern from V-04-08). 60s cap per cycle is generous — stub-mode
+        -- games typically end in <30s with force_tie=true.
+        local winner = wait_for_winner(game_id, 60)
+        if not winner then
+            log_fail(name, string.format(
+                "cycle %d: game.winner never populated within 60s (game_id=%s)",
+                i, tostring(game_id):sub(1, 8)))
+            return
+        end
+
+        logger:info(string.format(
+            "[V-05-10] cycle %d/10 complete (seed=%d, game_id=%s, winner=%s) — "
+            .. "sample RSS now if doing per-cycle trace",
+            i, seed, tostring(game_id):sub(1, 8), tostring(winner)))
+    end
+
+    logger:info("[V-05-10] AFTER soak: sample RSS now via — "
+        .. "pgrep -f 'wippy run' | head -1 | xargs -I{} ps -o rss= -p {}")
+    logger:info("[V-05-10] D-RR-04 acceptance: (after_kb - before_kb) < 10240 "
+        .. "AND (after_kb - before_kb) / before_kb < 0.05")
+    log_ok(name)
+end
+
+-- ──────────────────────────────────────────────────────────────────
 -- Main runner — sequential scenarios, then stay-alive-on-CANCEL.
 -- ──────────────────────────────────────────────────────────────────
 local function run(_args)
@@ -2549,6 +2615,11 @@ local function run(_args)
 
             -- V-05-06e: ring buffer cap — burst publishes → event_tail length == 20.
             test_v05_06e_event_tail_cap(inbox, v05_gm_pid)
+
+            -- V-05-10: RSS soak — 10 stub-mode game cycles (D-RR-02..04).
+            -- SKIPs unless MAFIA_NPC_MODE=stub. Logs ps-sample instructions
+            -- before + after the loop for human RSS audit.
+            test_v05_10_rss_soak(inbox, v05_gm_pid)
         end
 
         logger:info("[test_driver] Phase 5 V-05-XX scenarios complete "
