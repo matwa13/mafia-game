@@ -22,6 +22,13 @@ local env = require("env")
 -- On the first signal we classify crash-vs-clean, write games row if needed,
 -- and flip record.handled=true. The second signal no-ops via the handled guard.
 
+-- Forward declaration: respawn_orchestrator_for_rehydrate is defined later
+-- (it depends on spawn_orchestrator), but handle_process_event below needs to
+-- call it on EXIT/LINK_DOWN. Lua local-scope resolution requires the binding
+-- to exist before reference; the closure in handle_process_event resolves the
+-- upvalue at call time, not declaration time, so the forward decl is safe.
+local respawn_orchestrator_for_rehydrate
+
 local function find_record_by_pid(state, pid)
     for game_id, record in pairs(state.active_games) do
         if record.orch_pid == pid then return game_id, record end
@@ -42,6 +49,40 @@ local function mark_abandoned(game_id)
     db:release()
     if exec_err then return nil, "games.update: " .. tostring(exec_err) end
     return true, nil
+end
+
+-- Phase 5 D-RH-01: detect mid-game crash by reading games.ended_at.
+-- Returns true when the game row exists with started_at not null AND ended_at null.
+local function check_game_in_flight(game_id)
+    local db, db_err = sql.get("app:db")
+    if db_err or not db then return false end
+    local rows = db:query(
+        "SELECT started_at, ended_at FROM games WHERE id = ?",
+        { game_id }
+    )
+    db:release()
+    if not rows or not rows[1] then return false end
+    local row = rows[1]
+    return row.started_at ~= nil and row.ended_at == nil
+end
+
+-- Phase 5 D-RH-01: read rng_seed + player_slot from games row for respawn.
+-- player_name is not persisted to games (orchestrator defaults to "You" on
+-- rehydration; player_name only matters for chat display + persona partner_name).
+-- force_tie is not persisted either; rehydration assumes false (test-only flag).
+local function lookup_game_seed_and_slot(game_id)
+    local db, db_err = sql.get("app:db")
+    if db_err or not db then return nil end
+    local rows = db:query(
+        "SELECT rng_seed, player_slot FROM games WHERE id = ?",
+        { game_id }
+    )
+    db:release()
+    if not rows or not rows[1] then return nil end
+    return {
+        rng_seed = tonumber(rows[1].rng_seed),
+        player_slot = tonumber(rows[1].player_slot) or 1,
+    }
 end
 
 -- Handle one EXIT or LINK_DOWN. Dual-signal dedupe via record.handled.
@@ -85,6 +126,24 @@ local function handle_process_event(state, event)
     end
 
     if was_crash then
+        -- Phase 5 D-RH-01: before marking abandoned, check whether the game
+        -- is still in flight. If games.ended_at IS NULL, the orchestrator
+        -- crashed mid-game — respawn it instead of abandoning the row.
+        if check_game_in_flight(game_id) then
+            -- Mark this record handled BEFORE respawning so the second
+            -- signal of the dual-signal pair (LINK_DOWN after EXIT) is
+            -- swallowed by the dedupe guard against the OLD record.
+            record.handled = true
+            local new_pid = respawn_orchestrator_for_rehydrate(state, game_id, record)
+            if new_pid then
+                -- active_games is now keyed by the NEW pid; do NOT clear it.
+                return
+            end
+            -- Respawn failed — fall through to abandon path so the game
+            -- row gets marked ended (avoids zombie in-flight rows).
+            logger:warn("[game_manager] rehydration respawn failed; marking abandoned",
+                { game_id = game_id })
+        end
         local ok, err = mark_abandoned(game_id)
         if not ok then
             logger:error("[game_manager] mark_abandoned failed",
@@ -143,6 +202,47 @@ local function spawn_orchestrator(game_id, rng_seed, player_slot, force_tie, dri
         player_name = player_name,
     })
     return pid, err
+end
+
+-- Phase 5 D-RH-01: respawn orchestrator after a crash when the game is still
+-- in flight (games.ended_at IS NULL). Reuses spawn_orchestrator verbatim with
+-- the persisted rng_seed; orchestrator INIT detects the existing games row
+-- (started_at not null, ended_at null) and routes to rehydrate_state.
+-- Returns the new orchestrator pid or nil on failure.
+-- Assigned to the forward-declared `respawn_orchestrator_for_rehydrate` upvalue.
+respawn_orchestrator_for_rehydrate = function(state, game_id, prev_record)
+    local seed_row = lookup_game_seed_and_slot(game_id)
+    if not seed_row then
+        logger:warn("[game_manager] rehydrate: missing games row for in-flight game",
+            { game_id = game_id })
+        return nil
+    end
+    local driver_pid = (prev_record and prev_record.driver_pid) or nil
+    local new_pid, spawn_err = spawn_orchestrator(
+        game_id, seed_row.rng_seed, seed_row.player_slot,
+        false, driver_pid, nil  -- force_tie=false; player_name nil → orchestrator defaults to "You"
+    )
+    if not new_pid then
+        logger:error("[game_manager] rehydrate: orchestrator respawn failed",
+            { game_id = game_id, err = tostring(spawn_err) })
+        return nil
+    end
+    -- Reset record.handled=false so the new pid's EXIT/LINK_DOWN won't be
+    -- swallowed by the dual-signal dedupe guard. Re-key state.active_games
+    -- to the new pid (find_record_by_pid scans on orch_pid).
+    state.active_games[game_id] = {
+        orch_pid = new_pid,
+        driver_pid = driver_pid,
+        handled = false,
+        started_at = (prev_record and prev_record.started_at) or time.now():unix(),
+        rehydrated = true,
+    }
+    logger:info("[game_manager] orchestrator respawned for rehydration", {
+        game_id = game_id,
+        orch_pid = tostring(new_pid),
+        rng_seed = seed_row.rng_seed,
+    })
+    return new_pid
 end
 
 local function handle_game_start(state, payload)

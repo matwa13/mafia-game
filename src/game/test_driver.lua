@@ -2364,6 +2364,50 @@ local function test_v05_04_env_seed(inbox, gm_pid)
 end
 
 -- ──────────────────────────────────────────────────────────────────
+-- V-05-07/08/09: Restart rehydration. Killing a supervised orchestrator
+-- from inside this in-process test_driver requires either:
+--   - process.terminate(orch_pid) to force the abnormal-exit path that
+--     game_manager classifies as a crash (so the rehydrate respawn
+--     branch fires), AND
+--   - SQL state already advanced beyond INIT (so rehydrate_state has
+--     something meaningful to read).
+-- The first half is feasible (process.terminate worked in V-01-02 for
+-- NPC restart). The second half requires advancing the orchestrator
+-- through at least one phase via player.* commands — which the
+-- test_driver doesn't currently do for V-05-XX scenarios. Adding the
+-- full kill-and-resume harness here is a non-trivial test_driver
+-- expansion (multi-game setup, simulated player.start_game +
+-- player.advance_phase, post-rehydrate roster polling) that the plan's
+-- acceptance criteria explicitly allow to be SKIP'd with a documented
+-- manual-checkpoint fallback.
+-- The manual procedure (see SUMMARY.md): start a game in the SPA,
+-- advance to round 2 day, kill the wippy process, restart, observe the
+-- ReconnectingOverlay flicker, verify game resumes with same NPCs (SHA
+-- in dev panel unchanged), no duplicate messages.
+-- ──────────────────────────────────────────────────────────────────
+local function test_v05_07_orchestrator_respawn()
+    log_skip("V-05-07 orchestrator-respawn-after-crash",
+        "automated process.terminate + replay-to-mid-game harness is a "
+        .. "non-trivial test_driver expansion; manual SPA checkpoint covers "
+        .. "(see 05-05-SUMMARY.md \"Manual Verification\"). Acceptance criteria "
+        .. "explicitly permit log_skip with documented manual procedure.")
+end
+
+local function test_v05_08_no_duplicate_messages_after_respawn()
+    log_skip("V-05-08 no-duplicate-messages-after-respawn",
+        "depends on V-05-07 automated harness; manual SPA checkpoint covers "
+        .. "(observe message count in dev panel before kill, after restart).")
+end
+
+local function test_v05_09_persona_sha_after_respawn()
+    log_skip("V-05-09 persona-sha-after-respawn",
+        "depends on V-05-07 automated harness; manual SPA checkpoint covers "
+        .. "(persona SHA in dev panel must be unchanged after restart). The "
+        .. "byte-identical persona path is unit-tested by V-05-12 (persona_blob "
+        .. "structural proxy: length>200 + distinct).")
+end
+
+-- ──────────────────────────────────────────────────────────────────
 -- Main runner — sequential scenarios, then stay-alive-on-CANCEL.
 -- ──────────────────────────────────────────────────────────────────
 local function run(_args)
@@ -2549,6 +2593,12 @@ local function run(_args)
 
             -- V-05-06e: ring buffer cap — burst publishes → event_tail length == 20.
             test_v05_06e_event_tail_cap(inbox, v05_gm_pid)
+
+            -- V-05-07/08/09: restart rehydration. SKIP — manual SPA checkpoint
+            -- covers the kill-and-resume path; see 05-05-SUMMARY.md.
+            test_v05_07_orchestrator_respawn()
+            test_v05_08_no_duplicate_messages_after_respawn()
+            test_v05_09_persona_sha_after_respawn()
         end
 
         logger:info("[test_driver] Phase 5 V-05-XX scenarios complete "

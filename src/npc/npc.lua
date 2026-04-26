@@ -231,7 +231,13 @@ end
 
 --- assert_stable_hash(state) — re-compute SHA-256 over the persona block and
 --- assert equal to the boot-time hash. Panic on mismatch (D-15 Phase 1 inherited).
+--- Phase 5 D-RH-03: when an NPC is respawned with a pre-rendered persona_blob
+--- (state.from_persona_blob), the structured persona_args needed to re-render
+--- byte-identically are not available — the blob from SQL IS the canonical
+--- stable_block. Skip the re-render check in that case; the boot-time hash
+--- matches the blob's SHA by construction.
 local function assert_stable_hash(state)
+    if state.from_persona_blob then return end
     local now_bytes = tostring(persona.render_stable_block(state.persona_args))
     local now_hash = hash.sha256(now_bytes)
     assert(now_hash == state.stable_hash,
@@ -1169,24 +1175,54 @@ local function run(args)
 
     local NPC_ID = string.format("npc:%s:%d", game_id, slot)
 
-    -- 1. Build stable persona block from spawn args (parameterized per D-01/D-03).
-    local persona_args = {
-        archetype            = args.archetype or persona.FIXTURE.archetype,
-        name                 = args.name or persona.FIXTURE.name,
-        voice_quirk          = args.voice_quirk or persona.FIXTURE.voice,
-        canonical_utterances = args.canonical_utterances or {},
-        role                 = role,
-        partner_name         = args.mafia_partner_name,
-        roster_names         = args.roster_names or {},
-        rules_text           = persona.RULES,
-    }
-    local stable_block = tostring(persona.render_stable_block(persona_args))
-    local stable_hash = hash.sha256(stable_block)
+    -- 1. Build stable persona block.
+    -- Phase 5 D-RH-03: on rehydration respawn the orchestrator passes the
+    -- pre-rendered persona blob via args.persona_blob (read from
+    -- players.persona_blob in SQL by Plan 01's persist_persona_blobs). Use
+    -- it directly so the boot-time SHA matches what was rendered originally.
+    -- Re-rendering from sparse args (no canonical_utterances, etc.) would
+    -- produce a different SHA and break the Anthropic prompt cache anchor.
+    local persona_args
+    local stable_block
+    local stable_hash
+    local from_persona_blob = false
+    if type(args.persona_blob) == "string" and args.persona_blob ~= "" then
+        from_persona_blob = true
+        stable_block = args.persona_blob
+        stable_hash = hash.sha256(stable_block)
+        -- Minimal persona_args so other code paths (logging, dev snapshot
+        -- card) can still surface name/archetype.
+        persona_args = {
+            archetype            = args.archetype,
+            name                 = args.name,
+            voice_quirk          = args.voice_quirk,
+            canonical_utterances = args.canonical_utterances or {},
+            role                 = role,
+            partner_name         = args.mafia_partner_name,
+            roster_names         = args.roster_names or {},
+            rules_text           = persona.RULES,
+        }
+    else
+        -- Fresh spawn (parameterized per D-01/D-03).
+        persona_args = {
+            archetype            = args.archetype or persona.FIXTURE.archetype,
+            name                 = args.name or persona.FIXTURE.name,
+            voice_quirk          = args.voice_quirk or persona.FIXTURE.voice,
+            canonical_utterances = args.canonical_utterances or {},
+            role                 = role,
+            partner_name         = args.mafia_partner_name,
+            roster_names         = args.roster_names or {},
+            rules_text           = persona.RULES,
+        }
+        stable_block = tostring(persona.render_stable_block(persona_args))
+        stable_hash = hash.sha256(stable_block)
+    end
     -- Cache-minimum diagnostic (Pitfall 1 — >=4096 tokens on haiku-4-5).
     -- Token approximation: ~4 chars/token.
     logger:info("[npc] stable_block built", {
         npc = NPC_ID, hash = stable_hash, bytes = #stable_block,
         tokens_est = math.floor(#stable_block / 4),
+        from_persona_blob = from_persona_blob,
     })
     if (#stable_block / 4) < 4096 then
         logger:warn("[npc] stable_block under 4096-token cache minimum", {
@@ -1235,6 +1271,9 @@ local function run(args)
         stable_block = stable_block,
         stable_hash  = stable_hash,
         persona_args = persona_args,
+        -- Phase 5 D-RH-03: when true, assert_stable_hash skips re-render
+        -- (we don't have the full persona_args needed for byte-identical SHA).
+        from_persona_blob = from_persona_blob,
         name         = args.name,
         name_to_slot = args.name_to_slot or {},
         roster_names = args.roster_names or {},
