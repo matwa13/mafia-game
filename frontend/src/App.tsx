@@ -12,6 +12,7 @@ import { CharacterIntro } from "./components/CharacterIntro";
 import { NightOverlay } from "./components/NightOverlay";
 import { NightPicker } from "./components/NightPicker";
 import { BeginDayRow } from "./components/BeginDayRow";
+import { DevDrawer } from "./components/DevDrawer";
 import { Button } from "./components/primitives/Button";
 
 export default function App() {
@@ -27,6 +28,7 @@ export default function App() {
   const playerRole = useStore((s) => s.game.playerRole);
   const playerSlot = useStore((s) => s.game.playerSlot);
   const roster = useStore((s) => s.game.roster);
+  const devMode = useStore((s) => s.game.devMode);
 
   if (phase === null || phase === undefined) {
     return (
@@ -59,17 +61,20 @@ export default function App() {
       <StatusBanner />
       {lastElim && <EliminationRibbon victimName={lastElim.name} />}
       <main className="flex-1 flex min-h-0">
-        {phase === "day" && (
-          <>
-            <ChatTranscript />
-            <InterjectionInput />
-          </>
-        )}
-        {phase === "night" && playerRole === "villager" && <NightOverlay />}
-        {phase === "night" && playerRole === "mafia" &&
-          (playerDead ? <NightOverlay /> : <NightPicker />)}
-        {phase === "vote" && <VotePanel />}
-        {phase === "reveal" && <VotePanel />}
+        <div className="flex-1 min-w-0 flex flex-col">
+          {phase === "day" && (
+            <>
+              <ChatTranscript />
+              <InterjectionInput />
+            </>
+          )}
+          {phase === "night" && playerRole === "villager" && <NightOverlay />}
+          {phase === "night" && playerRole === "mafia" &&
+            (playerDead ? <NightOverlay /> : <NightPicker />)}
+          {phase === "vote" && <VotePanel />}
+          {phase === "reveal" && <VotePanel />}
+        </div>
+        {devMode && <DevDrawer />}
       </main>
       {phase === "night" && <BeginDayRow />}
       <LastWordsCardWrapper />
