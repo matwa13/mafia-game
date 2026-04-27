@@ -7,9 +7,9 @@ entries:
     source: file://test_driver.lua
     modules:
       - logger
-      - time
-      - sql
-      - env
+      - channel
+    imports:
+      v01: app.npc.tests:v01_setup
     method: run
 
   - name: test_driver_service

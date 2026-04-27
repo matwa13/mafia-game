@@ -41,14 +41,14 @@ if [ -n "$d09_violations" ]; then
     fail=1
 fi
 
-# --- D-15: publish_event(..., "chat.line", ...) only in the orchestrator ---
-# Phase 4: commit_chat_line now takes a scope parameter; the gate matches the
-# publish-call shape regardless of scope value. SOLE writer is still orchestrator.lua.
+# --- D-15: publish_event(..., "chat.line", ...) only in src/game/chat.lua ---
+# Phase 6 cut 6 (D-02): commit_chat_line moved from src/game/orchestrator.lua
+# to src/game/chat.lua — invariant codified in path.
 d15_violations=$(grep -rn --include='*.lua' 'publish_event.*chat\.line' src/ \
-    | grep -v 'src/game/orchestrator\.lua' \
+    | grep -v 'src/game/chat\.lua' \
     || true)
 if [ -n "$d15_violations" ]; then
-    echo "D-15 violation: publish_event(..., \"chat.line\", ...) must only appear in src/game/orchestrator.lua"
+    echo "D-15 violation: publish_event(..., \"chat.line\", ...) must only appear in src/game/chat.lua"
     echo "$d15_violations"
     fail=1
 fi
@@ -59,6 +59,7 @@ fi
 ap4_violations=$(grep -rn --include='*.lua' 'llm\.\(generate\|structured_output\)' src/ \
     | grep -v '^src/npc/' \
     | grep -v ':src/npc/' \
+    | grep -v -- '--.*llm\.' \
     || true)
 if [ -n "$ap4_violations" ]; then
     echo "AP4 violation: llm.generate / llm.structured_output must only appear in src/npc/"

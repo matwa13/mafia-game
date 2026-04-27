@@ -1,0 +1,17 @@
+version: "1.0"
+namespace: app.game
+
+entries:
+  - name: night
+    kind: library.lua
+    source: file://night.lua
+    modules:
+      - logger
+      - time
+      - sql
+      - channel
+      - json
+    imports:
+      pe: app.lib:events
+      det_rng: app.lib:det_rng
+      chat: app.game:chat

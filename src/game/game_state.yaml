@@ -1,0 +1,12 @@
+version: "1.0"
+namespace: app.game
+
+entries:
+  - name: game_state
+    kind: library.lua
+    source: file://game_state.lua
+    modules:
+      - logger
+    imports:
+      pe: app.lib:events
+      dev_telemetry: app.game:dev_telemetry

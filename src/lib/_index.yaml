@@ -17,3 +17,16 @@ entries:
   - name: det_rng
     kind: library.lua
     source: file://det_rng.lua
+
+  # T-03 (Phase 6): Shared test-harness helpers. Single home for log_ok/
+  # log_fail/log_skip + sql/poll/wait helpers used by both
+  # src/game/test_driver.lua and src/npc/test_driver.lua. Log format
+  # strings (`[TEST] %s OK|FAIL|SKIP`) match Phase 1 D-21.
+  - name: test_harness
+    kind: library.lua
+    source: file://test_harness.lua
+    modules:
+      - logger
+      - time
+      - sql
+      - channel
