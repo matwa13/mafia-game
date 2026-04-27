@@ -19,4 +19,5 @@ entries:
       sampler: app.npc:sampler
       persona_pool: app.npc:persona_pool
       persona: app.npc:persona
+      chat: app.game:chat               # NEW (cut 6, D-02)
     method: run

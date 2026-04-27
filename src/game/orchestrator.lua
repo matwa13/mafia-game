@@ -19,6 +19,7 @@ local det_rng = require("det_rng")  -- D-SD-05: same-seed-same-setup determinism
 local sampler      = require("sampler")
 local persona_pool = require("persona_pool")
 local persona      = require("persona")
+local chat         = require("chat")  -- D-02 / D-15: SOLE writer of chat.line events (cut 6)
 
 local function dev_mode()
     return env.get("MAFIA_DEV_MODE") == "1"
@@ -690,56 +691,6 @@ local function speaking_order(alive, player_slot)
     return order
 end
 
--- Write one message row and publish chat.line. SOLE site that mutates chat_seq
--- and SOLE publisher of `chat.line`. SETUP-05: INSERT precedes publish_event.
--- Returns the assigned seq on success, or nil + err on failure.
--- Optional `kind` param (default "npc") allows "human" and "last_words" callers.
--- Optional `preassigned_seq`: if provided, use it instead of auto-incrementing.
--- This lets an NPC turn RESERVE its seq at start (before streaming) so that any
--- user interjection committed during the turn gets a seq numerically HIGHER
--- than the NPC's — guaranteeing the NPC's bubble renders above the user's
--- when the SPA sorts by seq.
-local function commit_chat_line(game_id, round, from_slot, text, chat_seq, kind, preassigned_seq, scope)
-    kind = kind or "npc"
-    scope = scope or "public"
-    local seq
-    if preassigned_seq then
-        seq = preassigned_seq
-    else
-        chat_seq[round] = (chat_seq[round] or 0) + 1
-        seq = chat_seq[round]
-    end
-
-    local db, db_err = sql.get("app:db")
-    if db_err or not db then
-        return nil, "sql.get: " .. tostring(db_err)
-    end
-    local _, exec_err = db:execute(
-        "INSERT INTO messages (game_id, round, seq, phase, from_slot, kind, text, created_at) VALUES (?, ?, ?, 'day', ?, ?, ?, ?)",
-        { game_id, round, seq, from_slot, kind, text, time.now():unix() }
-    )
-    db:release()
-    if exec_err then
-        return nil, "messages.insert: " .. tostring(exec_err)
-    end
-
-    -- SETUP-05: publish AFTER successful INSERT.
-    pe.publish_event(scope, "chat.line", "/" .. game_id, {
-        round = round,
-        seq = seq,
-        from_slot = from_slot,
-        text = text,
-        kind = kind,
-    })
-    return seq, nil
-end
-
--- commit_player_chat: convenience wrapper for human interjections (kind="human").
--- D-15 invariant: routes through commit_chat_line, the SOLE writer of messages.
-local function commit_player_chat(game_id, round, from_slot, text, chat_seq)
-    return commit_chat_line(game_id, round, from_slot, tostring(text or ""), chat_seq, "human")
-end
-
 -- Phase 4 LOOP-03 (Mafia branch): partner NPC opens with a side-chat suggestion;
 -- human and partner alternate strictly; loop ends when human submits
 -- player.night_pick. If partner is dead (D-SC-06), no side-chat — just wait for
@@ -822,7 +773,7 @@ local function run_night_mafia_human(game_id, round, alive, roles, player_slot,
             local suggested_target_slot = tonumber(raw.suggested_target_slot)
             local commit_seq = pending_reply_seq  -- reuse pre-reserved seq; no +1
             pending_reply_seq = nil
-            local _, werr = commit_chat_line(
+            local _, werr = chat.commit_chat_line(
                 game_id, round, from_slot, text, chat_seq, "mafia_chat", commit_seq, "mafia")
             if werr then
                 logger:warn("[orchestrator] mafia_chat commit failed (partner)",
@@ -845,7 +796,7 @@ local function run_night_mafia_human(game_id, round, alive, roles, player_slot,
             else
                 chat_seq[round] = (chat_seq[round] or 0) + 1
                 local commit_seq = chat_seq[round]
-                local _, werr = commit_chat_line(
+                local _, werr = chat.commit_chat_line(
                     game_id, round, player_slot, text, chat_seq, "mafia_chat", commit_seq, "mafia")
                 if werr then
                     logger:warn("[orchestrator] mafia_chat commit failed (human)",
@@ -1164,7 +1115,7 @@ local function run_day_discussion(game_id, round, alive, player_slot, npc_pids,
 
                         if reply_slot == slot and reply_round == round then
                             if not dead and text and text ~= "" then
-                                local _, write_err = commit_chat_line(
+                                local _, write_err = chat.commit_chat_line(
                                     game_id, round, slot, tostring(text), chat_seq)
                                 if write_err then
                                     logger:error("[orchestrator] commit_chat_line failed",
@@ -1342,7 +1293,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                             -- Use the reserved seq so this NPC lands at its
                             -- pre-allocated slot regardless of intervening user
                             -- interjections (which took higher seqs).
-                            local _, werr = commit_chat_line(game_id, round, slot,
+                            local _, werr = chat.commit_chat_line(game_id, round, slot,
                                 tostring(raw.text or ""), chat_seq, kind, reserved_seq)
                             if werr then
                                 logger:error("[orchestrator] commit_chat_line failed",
@@ -1369,7 +1320,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                             -- incremented seq (which is > reserved_seq), so
                             -- the SPA's seq-sorted render puts the user's
                             -- bubble BELOW this NPC's (still-pending) bubble.
-                            local _, werr = commit_player_chat(game_id, round,
+                            local _, werr = chat.commit_player_chat(game_id, round,
                                 from, text, chat_seq)
                             if werr then
                                 logger:warn("[orchestrator] commit_player_chat failed",
@@ -1460,7 +1411,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                 local text = tostring(raw.text or "")
                 local from = raw.from_slot or player_slot
                 if text ~= "" and alive[from] then
-                    local _, werr = commit_player_chat(game_id, round,
+                    local _, werr = chat.commit_player_chat(game_id, round,
                         from, text, chat_seq)
                     if werr then
                         logger:warn("[orchestrator] commit_player_chat failed",
@@ -1875,7 +1826,7 @@ local function run_vote_round_llm(game_id, round, alive, roles, player_slot, npc
                 local raw = (m:payload():data()) or {}
                 if raw.from_slot == top_slot and raw.kind == "last_words" then
                     local top_slot_i = math.floor(tonumber(top_slot) or 0)
-                    local _, werr = commit_chat_line(game_id, round, top_slot_i,
+                    local _, werr = chat.commit_chat_line(game_id, round, top_slot_i,
                         tostring(raw.text or ""), chat_seq, "last_words")
                     if werr then
                         logger:warn("[orchestrator] last_words commit failed",
