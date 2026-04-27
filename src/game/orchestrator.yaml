@@ -20,4 +20,6 @@ entries:
       persona_pool: app.npc:persona_pool
       persona: app.npc:persona
       chat: app.game:chat               # NEW (cut 6, D-02)
+      game_state: app.game:game_state             # NEW (cut 6)
+      dev_telemetry: app.game:dev_telemetry       # NEW (cut 6)
     method: run

@@ -1,0 +1,14 @@
+version: "1.0"
+namespace: app.game
+
+entries:
+  - name: dev_telemetry
+    kind: library.lua
+    source: file://dev_telemetry.lua
+    modules:
+      - logger
+      - time
+      - channel
+      - env
+    imports:
+      pe: app.lib:events
