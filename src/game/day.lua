@@ -115,7 +115,7 @@ local function run_day_discussion(game_id, round, alive, player_slot, npc_pids,
 
                         if reply_slot == slot and reply_round == round then
                             if not dead and text and text ~= "" then
-                                local _, write_err = chat.commit_chat_line(
+                                local _, write_err = chat.commit_npc_chat_with_delay(
                                     game_id, round, slot, tostring(text), chat_seq)
                                 if write_err then
                                     logger:error("[orchestrator] commit_chat_line failed",
@@ -293,7 +293,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                             -- Use the reserved seq so this NPC lands at its
                             -- pre-allocated slot regardless of intervening user
                             -- interjections (which took higher seqs).
-                            local _, werr = chat.commit_chat_line(game_id, round, slot,
+                            local _, werr = chat.commit_npc_chat_with_delay(game_id, round, slot,
                                 tostring(raw.text or ""), chat_seq, kind, reserved_seq)
                             if werr then
                                 logger:error("[orchestrator] commit_chat_line failed",

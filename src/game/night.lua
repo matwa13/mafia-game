@@ -412,7 +412,7 @@ local function run_night_mafia_human(game_id, round, alive, roles, player_slot,
             local text = tostring(raw.side_chat_text or "")
             local suggested_target_slot = raw.suggested_target_slot
             if text ~= "" and pending_reply_seq then
-                local _, werr = chat.commit_chat_line(
+                local _, werr = chat.commit_npc_chat_with_delay(
                     game_id, round, partner_slot, text, chat_seq, "mafia_chat",
                     pending_reply_seq, "mafia")
                 if werr then

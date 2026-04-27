@@ -385,7 +385,7 @@ local function run_vote_round_llm(game_id, round, alive, roles, player_slot, npc
                 local raw = (m:payload():data()) or {}
                 if raw.from_slot == top_slot and raw.kind == "last_words" then
                     local top_slot_i = math.floor(tonumber(top_slot) or 0)
-                    local _, werr = chat.commit_chat_line(game_id, round, top_slot_i,
+                    local _, werr = chat.commit_npc_chat_with_delay(game_id, round, top_slot_i,
                         tostring(raw.text or ""), chat_seq, "last_words")
                     if werr then
                         logger:warn("[orchestrator] last_words commit failed",
