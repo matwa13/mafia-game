@@ -10,9 +10,7 @@ entries:
       - events
       - time
       - sql
-      - uuid
       - env
-      - json
     imports:
       pe: app.lib:events
       det_rng: app.lib:det_rng

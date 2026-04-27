@@ -1,18 +1,12 @@
--- src/game/orchestrator.lua
--- Phase 2 Plan 02: orchestrator INIT phase.
--- D-01/D-02: dynamically spawned by game_manager via spawn_linked_monitored.
--- D-03: shuffle 2M+4V roles; INSERT 6 players rows (5 NPC slots 2..6 + 1 player); reveal partner to mafia.
--- D-04: args carry rng_seed, player_slot, force_tie (flows to vote.prompt Plan 04).
--- D-12: game.started reply shape to driver.
--- D-14: helpers stay inline until >80 lines (Phase 2 scope).
--- D-20: orchestrator sole writer of messages (Plans 03/04 enforce).
--- Plan 02 scope: INIT only. Plan 03 adds Night/Day, Plan 04 adds Vote/Win/Shutdown.
+-- src/game/orchestrator.lua — Phase 6 refactor target shape:
+-- run() entry + FSM channel.select dispatch + setup helpers only.
+-- All phase logic lives in src/game/{intro,night,day,vote,end_game}.lua.
+-- All cross-cutting concerns live in src/game/{chat,game_state,dev_telemetry}.lua.
 
 local logger = require("logger"):named("orchestrator")
 local time = require("time")
 local channel = require("channel")
 local sql = require("sql")
-local uuid = require("uuid")
 local env = require("env")
 local pe = require("pe")  -- Phase 1 D-11 precedent: yaml imports pe -> app.lib:events
 local det_rng = require("det_rng")  -- D-SD-05: same-seed-same-setup determinism
