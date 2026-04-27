@@ -13,8 +13,6 @@ local logger      = require("logger"):named("end_game")
 local time        = require("time")
 local sql         = require("sql")
 local pe          = require("pe")
-local game_state  = require("game_state")
-local dev_telemetry = require("dev_telemetry")
 
 -- check_win: D-20 rule.
 -- Returns 'villager' if living_mafia == 0,

@@ -11,5 +11,3 @@ entries:
       - sql
     imports:
       pe: app.lib:events
-      game_state: app.game:game_state
-      dev_telemetry: app.game:dev_telemetry
