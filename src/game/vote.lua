@@ -54,7 +54,7 @@ local function gather_votes(game_id, round, alive, player_slot, npc_pids, force_
     -- Simultaneous: send vote.prompt to all alive NPCs BEFORE collecting any reply.
     for slot in pairs(awaiting) do
         local npc_pid = npc_pids[slot]
-        if npc_pid then
+        if type(npc_pid) == "string" then
             process.send(npc_pid, "vote.prompt", {
                 round = round,
                 alive_slots = alive_arr,
@@ -198,7 +198,7 @@ local function run_vote_round(game_id, round, alive, roles, player_slot, npc_pid
 
         -- D-13 belt-and-suspenders: notify the lynched stub so it sets dead=true.
         local pid = npc_pids[top_slot]
-        if pid then
+        if type(pid) == "string" then
             process.send(pid, "eliminated", { slot = top_slot, round = round })
         end
 
@@ -248,7 +248,7 @@ local function run_vote_round_llm(game_id, round, alive, roles, player_slot, npc
     -- Fan-out vote.prompt to all living NPCs (player excluded).
     for slot = 1, 6 do
         local npid = npc_pids[slot]
-        if alive[slot] and slot ~= player_slot and npid then
+        if alive[slot] and slot ~= player_slot and type(npid) == "string" then
             process.send(npid, "vote.prompt", { round = round })
         end
     end
@@ -372,7 +372,7 @@ local function run_vote_round_llm(game_id, round, alive, roles, player_slot, npc
 
     -- Last-words dispatch (NPC-09) — only for NPC slots, not the player.
     local victim_pid = npc_pids[top_slot]
-    if top_slot ~= player_slot and victim_pid then
+    if top_slot ~= player_slot and type(victim_pid) == "string" then
         process.send(victim_pid, "eliminated", {
             slot = top_slot, round = round, request_last_words = true,
         })

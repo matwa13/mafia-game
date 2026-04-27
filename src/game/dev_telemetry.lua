@@ -52,8 +52,10 @@ local function request_dev_snapshots(state)
     local replies = {}
     local pending = {}
     for slot, pid in pairs(state.npc_pids or {}) do
-        process.send(pid, "dev.snapshot.request", { round = state.round, phase = state.phase })
-        pending[slot] = true
+        if type(pid) == "string" then
+            process.send(pid, "dev.snapshot.request", { round = state.round, phase = state.phase })
+            pending[slot] = true
+        end
     end
     local inbox = process.inbox()
     local deadline = time.after(cap)

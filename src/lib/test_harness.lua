@@ -71,7 +71,7 @@ end
 local function count_rows(sql_str, params)
     local db, err = sql.get("app:db")
     if err or not db then return -1, "sql.get: " .. tostring(err) end
-    local rows, q_err = db:query(sql_str, params or {})
+    local rows, q_err = db:query(tostring(sql_str), params or {})
     db:release()
     if q_err or not rows or not rows[1] then return -1, tostring(q_err) end
     local r = rows[1]

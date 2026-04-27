@@ -12,7 +12,7 @@ local function shuffled_indices(n, seed)
     local idx = {}
     for i = 1, n do idx[i] = i end
     for i = n, 2, -1 do
-        local j = rng:int(i)
+        local j = det_rng.int(rng, i)
         idx[i], idx[j] = idx[j], idx[i]
     end
     return idx

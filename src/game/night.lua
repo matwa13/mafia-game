@@ -108,7 +108,7 @@ local function run_night_stub(game_id, round, rng_seed, alive, roles, npc_pids)
 
     -- D-13 belt-and-suspenders: notify the eliminated stub so it sets dead=true.
     local victim_pid = npc_pids[victim_slot]
-    if victim_pid then
+    if type(victim_pid) == "string" then
         process.send(victim_pid, "eliminated", { slot = victim_slot, round = round })
     end
 
@@ -165,7 +165,8 @@ local function run_night_villager_auto(game_id, round, alive, roles, npc_pids, r
 
     -- 3. Dispatch night.pick to every living Mafia NPC. Replies arrive on inbox.
     for _, mslot in ipairs(mafia_pickers) do
-        process.send(npc_pids[mslot], "night.pick", {
+        local mafia_pid = tostring(npc_pids[mslot])
+        process.send(mafia_pid, "night.pick", {
             round = round,
             living_target_slots = living_target_slots,
             living_target_names = living_target_names,
@@ -311,7 +312,7 @@ local function run_night_villager_auto(game_id, round, alive, roles, npc_pids, r
 
     alive[winning_target_slot] = false
     local victim_pid = npc_pids[winning_target_slot]
-    if victim_pid then
+    if type(victim_pid) == "string" then
         process.send(victim_pid, "eliminated",
             { slot = winning_target_slot, round = round })
     end
@@ -387,7 +388,8 @@ local function run_night_mafia_human(game_id, round, alive, roles, player_slot,
         local reserved = chat_seq[round]
         pending_reply_seq = reserved
         partner_thinking = true
-        process.send(npc_pids[partner_slot], "night.side_chat", {
+        local partner_pid = tostring(npc_pids[partner_slot])
+        process.send(partner_pid, "night.side_chat", {
             round = round,
             living_target_slots = living_target_slots,
             living_target_names = living_target_names,
@@ -450,7 +452,8 @@ local function run_night_mafia_human(game_id, round, alive, roles, player_slot,
                     local reserved = chat_seq[round]
                     pending_reply_seq = reserved
                     partner_thinking = true
-                    process.send(npc_pids[partner_slot], "night.side_chat", {
+                    local partner_pid_loop = tostring(npc_pids[partner_slot])
+                    process.send(partner_pid_loop, "night.side_chat", {
                         round = round,
                         living_target_slots = living_target_slots,
                         living_target_names = living_target_names,
@@ -536,7 +539,7 @@ local function run_night_mafia_human(game_id, round, alive, roles, player_slot,
 
     alive[victim_slot] = false
     local victim_pid = npc_pids[victim_slot]
-    if victim_pid then
+    if type(victim_pid) == "string" then
         process.send(victim_pid, "eliminated", { slot = victim_slot, round = round })
     end
 

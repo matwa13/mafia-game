@@ -56,7 +56,7 @@ local function shuffle_roles(rng_seed)
     roles[5] = "villager"
     roles[6] = "villager"
     for i = 6, 2, -1 do
-        local j = rng:int(i)
+        local j = det_rng.int(rng, i)
         roles[i], roles[j] = roles[j], roles[i]
     end
     return roles  -- roles[slot] = "mafia"|"villager" for slot in 1..6

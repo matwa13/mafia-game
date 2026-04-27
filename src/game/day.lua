@@ -75,7 +75,7 @@ local function run_day_discussion(game_id, round, alive, player_slot, npc_pids,
 
     for _, slot in ipairs(order) do
         local npc_pid = npc_pids[slot]
-        if not npc_pid then
+        if type(npc_pid) ~= "string" then
             logger:warn("[orchestrator] no pid for slot", { slot = slot })
         else
             process.send(npc_pid, "day.turn", {
@@ -212,7 +212,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
     end
 
     -- Randomized-start round-robin over alive NPC slots (exclude player).
-    math.randomseed(math.floor(tonumber(rng_seed) or 0) + round * 1000)
+    math.randomseed(math.floor((tonumber(rng_seed) or 0) + (tonumber(round) or 0) * 1000))
     local living_npc_slots = {}
     for slot = 1, 6 do
         if alive[slot] and slot ~= player_slot then
@@ -241,7 +241,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                 goto continue_slot
             end
             local npc_pid = npc_pids[slot]
-            if not npc_pid then
+            if type(npc_pid) ~= "string" then
                 goto continue_slot
             end
 

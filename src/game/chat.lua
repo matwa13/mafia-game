@@ -24,7 +24,7 @@ local pe     = require("pe")
 -- when the SPA sorts by seq.
 local function commit_chat_line(game_id, round, from_slot, text, chat_seq, kind, preassigned_seq, scope)
     kind = kind or "npc"
-    scope = scope or "public"
+    local effective_scope = type(scope) == "string" and scope or "public"
     local seq
     if preassigned_seq then
         seq = preassigned_seq
@@ -47,7 +47,7 @@ local function commit_chat_line(game_id, round, from_slot, text, chat_seq, kind,
     end
 
     -- SETUP-05: publish AFTER successful INSERT.
-    pe.publish_event(scope, "chat.line", "/" .. game_id, {
+    pe.publish_event(effective_scope, "chat.line", "/" .. game_id, {
         round = round,
         seq = seq,
         from_slot = from_slot,

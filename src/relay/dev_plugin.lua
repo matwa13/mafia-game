@@ -92,7 +92,7 @@ local function run(_args)
                 local frame_type = "dev_" .. kind
                 local data       = evt.data or {}
                 for cpid, _ in pairs(conns) do
-                    forward(cpid, frame_type, data)
+                    process.send(cpid, frame_type, data)
                 end
                 logger:info("[dev_plugin] forwarded dev event",
                     { kind = kind, conn_count = (function()

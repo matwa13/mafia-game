@@ -69,7 +69,9 @@ local function shutdown_cascade(game_id, round, winner, living_mafia, living_vil
 
     -- Cascade cancel all NPC stubs (Pitfall 3).
     for _, pid in pairs(npc_pids) do
-        process.cancel(pid, "500ms")
+        if type(pid) == "string" then
+            process.cancel(pid, "500ms")
+        end
     end
     logger:info("[orchestrator] shutdown cascade complete", {
         winner = winner, final_round = round,
