@@ -94,9 +94,8 @@ const initialDev: DevSlice = {
   mafiaPartnerSlots: null,
 };
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function asRecord(v: unknown): Record<string, any> {
-  return (v && typeof v === "object" ? v : {}) as Record<string, any>;
+function asRecord(v: unknown): Record<string, unknown> {
+  return (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
 }
 
 export const useStore = create<StoreState>((set, get) => ({
@@ -106,7 +105,7 @@ export const useStore = create<StoreState>((set, get) => ({
   sideChat: initialSideChat,
   night: initialNight,
   dev: initialDev,
-  send: (_type: string, _data: unknown) => {
+  send: () => {
     console.warn("[store] send called before ws hook set it");
   },
   setSend: (fn) => set({ send: fn }),

@@ -5,15 +5,14 @@ interface EliminationRibbonProps {
 }
 
 export function EliminationRibbon({ victimName }: EliminationRibbonProps) {
-  const [visible, setVisible] = useState(true);
+  const [hiddenFor, setHiddenFor] = useState<string | null>(null);
 
   useEffect(() => {
-    setVisible(true);
-    const timer = setTimeout(() => setVisible(false), 6500);
+    const timer = setTimeout(() => setHiddenFor(victimName), 6500);
     return () => clearTimeout(timer);
   }, [victimName]);
 
-  if (!visible) return null;
+  if (hiddenFor === victimName) return null;
 
   return (
     <div
