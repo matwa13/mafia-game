@@ -524,8 +524,7 @@ local function test_v05_11_persona_blob_populated(inbox, gm_pid)
     local ok = poll_until(function()
         local n = count_rows(
             "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND slot != 1 "
-            .. "AND (persona_blob IS NULL OR persona_blob = '')",
-            { game_id })
+            .. "AND (persona_blob IS NULL OR persona_blob = '')", game_id)
         return n == 0, n
     end, 5, "200ms")
     if ok then
@@ -533,8 +532,7 @@ local function test_v05_11_persona_blob_populated(inbox, gm_pid)
     else
         local empty_n = count_rows(
             "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND slot != 1 "
-            .. "AND (persona_blob IS NULL OR persona_blob = '')",
-            { game_id })
+            .. "AND (persona_blob IS NULL OR persona_blob = '')", game_id)
         log_fail(name, "still " .. tostring(empty_n)
             .. " NPC slots with empty persona_blob after 5s for game=" .. game_id)
     end
@@ -572,8 +570,7 @@ local function test_v05_12_persona_blob_sha(inbox, gm_pid)
     local ok = poll_until(function()
         local n = count_rows(
             "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND slot != 1 "
-            .. "AND persona_blob IS NOT NULL AND length(persona_blob) > 200",
-            { game_id })
+            .. "AND persona_blob IS NOT NULL AND length(persona_blob) > 200", game_id)
         return n == 5, n
     end, 5, "200ms")
     if not ok then
@@ -754,8 +751,7 @@ local function test_v05_13_rounds_phase_upsert(inbox, gm_pid)
     -- Wait for night_actions row (night resolved).
     local night_ok = poll_until(function()
         local n = count_rows(
-            "SELECT COUNT(*) AS n FROM night_actions WHERE game_id = ? AND round = 1",
-            { game_id })
+            "SELECT COUNT(*) AS n FROM night_actions WHERE game_id = ? AND round = 1", game_id)
         return n >= 1, n
     end, 20, "300ms")
     if not night_ok then
@@ -764,8 +760,7 @@ local function test_v05_13_rounds_phase_upsert(inbox, gm_pid)
     end
 
     -- Confirm rounds.phase is currently 'night' before the advance.
-    local night_row = get_row(
-        "SELECT phase FROM rounds WHERE game_id = ? AND round = 1", { game_id })
+    local night_row = get_row("SELECT phase FROM rounds WHERE game_id = ? AND round = 1", game_id)
     if not night_row or night_row.phase ~= "night" then
         log_fail(name, "expected phase='night' before advance, got: "
             .. tostring(night_row and night_row.phase))
@@ -782,8 +777,7 @@ local function test_v05_13_rounds_phase_upsert(inbox, gm_pid)
 
     -- Poll until phase flips to 'day'.
     local day_ok = poll_until(function()
-        local r = get_row(
-            "SELECT phase FROM rounds WHERE game_id = ? AND round = 1", { game_id })
+        local r = get_row("SELECT phase FROM rounds WHERE game_id = ? AND round = 1", game_id)
         if r and r.phase == "day" then return true, r.phase end
         return false, nil
     end, 10, "200ms")
@@ -791,8 +785,7 @@ local function test_v05_13_rounds_phase_upsert(inbox, gm_pid)
     if day_ok then
         log_ok(name)
     else
-        local r = get_row(
-            "SELECT phase FROM rounds WHERE game_id = ? AND round = 1", { game_id })
+        local r = get_row("SELECT phase FROM rounds WHERE game_id = ? AND round = 1", game_id)
         log_fail(name, "rounds.phase never became 'day' after player.advance_phase; got: "
             .. tostring(r and r.phase) .. " for game=" .. game_id)
     end
@@ -840,20 +833,16 @@ local function test_v05_02_same_seed_determinism(inbox, gm_pid)
     -- Poll until both games have 6 player rows with display_name populated.
     local ok = poll_until(function()
         local n1 = count_rows(
-            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL",
-            { g1 })
+            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL", g1)
         local n2 = count_rows(
-            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL",
-            { g2 })
+            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL", g2)
         return n1 == 6 and n2 == 6, { n1, n2 }
     end, 10, "200ms")
     if not ok then
         local n1 = count_rows(
-            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL",
-            { g1 })
+            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL", g1)
         local n2 = count_rows(
-            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL",
-            { g2 })
+            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL", g2)
         log_fail(name, string.format(
             "player rows not ready after 10s: game1=%d game2=%d (expected 6 each)", n1, n2))
         return
@@ -933,14 +922,14 @@ local function test_v05_04_env_seed(inbox, gm_pid)
 
     -- Assert games.rng_seed == expected_seed (confirms env fallback was used).
     local ok_seed = poll_until(function()
-        local row = get_row("SELECT rng_seed FROM games WHERE id = ?", { g1 })
+        local row = get_row("SELECT rng_seed FROM games WHERE id = ?", g1)
         return row ~= nil, row
     end, 5, "100ms")
     if not ok_seed then
         log_fail(name, "games row never appeared for game1=" .. g1)
         return
     end
-    local seed_row = get_row("SELECT rng_seed FROM games WHERE id = ?", { g1 })
+    local seed_row = get_row("SELECT rng_seed FROM games WHERE id = ?", g1)
     if not seed_row then
         log_fail(name, "games row missing for game1=" .. g1)
         return
@@ -968,11 +957,9 @@ local function test_v05_04_env_seed(inbox, gm_pid)
     -- Wait for both rosters to be populated.
     local roster_ok = poll_until(function()
         local n1 = count_rows(
-            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL",
-            { g1 })
+            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL", g1)
         local n2 = count_rows(
-            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL",
-            { g2 })
+            "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND display_name IS NOT NULL", g2)
         return n1 == 6 and n2 == 6, { n1, n2 }
     end, 10, "200ms")
     if not roster_ok then

@@ -145,8 +145,7 @@ local function test_suspicion_persistence(inbox, gm_pid)
     local ok = poll_until(function()
         local n = count_rows(
             "SELECT COUNT(*) AS n FROM suspicion_snapshots "
-            .. "WHERE game_id = ? AND round = 1 AND snapshot_json IS NOT NULL",
-            { game_id })
+            .. "WHERE game_id = ? AND round = 1 AND snapshot_json IS NOT NULL", game_id)
         return n >= 4, n
     end, 45, "500ms")
     if ok then
@@ -154,8 +153,7 @@ local function test_suspicion_persistence(inbox, gm_pid)
     else
         local n = count_rows(
             "SELECT COUNT(*) AS n FROM suspicion_snapshots "
-            .. "WHERE game_id = ? AND round = 1 AND snapshot_json IS NOT NULL",
-            { game_id })
+            .. "WHERE game_id = ? AND round = 1 AND snapshot_json IS NOT NULL", game_id)
         log_fail(name, string.format(
             "suspicion_snapshots count=%d for game_id=%s round=1 (expected >= 4)", n, game_id))
     end
@@ -169,13 +167,13 @@ local function test_last_words_emitted()
     local name = "V-03-06 last-words-emitted"
     -- Check for eliminations first; if none happened yet, SKIP.
     local elim_n = count_rows(
-        "SELECT COUNT(*) AS n FROM eliminations WHERE cause = ?", { "lynch" })
+        "SELECT COUNT(*) AS n FROM eliminations WHERE cause = ?", "lynch")
     if elim_n == 0 then
         log_skip(name, "no lynch eliminations yet in this session; re-run after a full round")
         return
     end
     local lw_n = count_rows(
-        "SELECT COUNT(*) AS n FROM messages WHERE kind = ?", { "last_words" })
+        "SELECT COUNT(*) AS n FROM messages WHERE kind = ?", "last_words")
     if lw_n >= 1 then
         log_ok(name)
     else
@@ -202,8 +200,7 @@ local function test_interjection_visible(inbox, gm_pid)
     end
     -- Wait until Day-1 is active (round 1 phase='day' row exists).
     local day_ok = poll_until(function()
-        local r = get_row(
-            "SELECT phase FROM rounds WHERE game_id = ? AND round = 1", { game_id })
+        local r = get_row("SELECT phase FROM rounds WHERE game_id = ? AND round = 1", game_id)
         if r and r.phase == "day" then return true, r end
         return false, nil
     end, 20, "200ms")
@@ -226,9 +223,7 @@ local function test_interjection_visible(inbox, gm_pid)
     })
     -- Assert kind='human' row lands within 3s.
     local found = poll_until(function()
-        local r = get_row(
-            "SELECT text FROM messages WHERE game_id = ? AND kind = 'human' AND text LIKE '%Ana%'",
-            { game_id })
+        local r = get_row("SELECT text FROM messages WHERE game_id = ? AND kind = 'human' AND text LIKE '%Ana%'", game_id)
         return r ~= nil, r
     end, 3, "100ms")
     if found then
@@ -250,9 +245,7 @@ local function test_turn_count(game_id)
     end
     -- Wait for round 1 day phase to end.
     poll_until(function()
-        local r = get_row(
-            "SELECT ended_at FROM rounds WHERE game_id = ? AND round = 1 AND phase = 'day'",
-            { game_id })
+        local r = get_row("SELECT ended_at FROM rounds WHERE game_id = ? AND round = 1 AND phase = 'day'", game_id)
         if r and r.ended_at then return true, r end
         return false, nil
     end, 30, "500ms")
@@ -261,8 +254,7 @@ local function test_turn_count(game_id)
     for slot = 2, 6 do
         local row = get_row(
             "SELECT COUNT(*) AS n FROM messages "
-            .. "WHERE game_id = ? AND round = 1 AND from_slot = ? AND kind = 'npc'",
-            { game_id, slot })
+            .. "WHERE game_id = ? AND round = 1 AND from_slot = ? AND kind = 'npc'", game_id, slot)
         local count = (row and tonumber(row.n)) or 0
         if count < 1 or count > 2 then
             table.insert(problems, string.format("slot %d: %d messages (expected 1-2)", slot, count))
@@ -307,7 +299,7 @@ local function test_villager_win_v3(inbox, gm_pid)
         -- Wait up to 90s per seed (4 rounds × ~20s in dev mode).
         local winner = nil
         poll_until(function()
-            local r = get_row("SELECT winner FROM games WHERE id = ?", { game_id })
+            local r = get_row("SELECT winner FROM games WHERE id = ?", game_id)
             if r and r.winner then winner = r.winner; return true, r.winner end
             return false, nil
         end, 90, "1000ms")

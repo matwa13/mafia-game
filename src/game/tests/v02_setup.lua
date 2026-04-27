@@ -87,27 +87,25 @@ local function test_spawn(inbox, gm_pid)
 
     -- SQL row-count assertions.
     local games_n = count_rows(
-        "SELECT COUNT(*) AS n FROM games WHERE id = ?", { game_id })
+        "SELECT COUNT(*) AS n FROM games WHERE id = ?", game_id)
     if games_n ~= 1 then
         log_fail(name, "games count=" .. tostring(games_n))
         return nil
     end
     local players_n = count_rows(
-        "SELECT COUNT(*) AS n FROM players WHERE game_id = ?", { game_id })
+        "SELECT COUNT(*) AS n FROM players WHERE game_id = ?", game_id)
     if players_n ~= 6 then
         log_fail(name, "players count=" .. tostring(players_n) .. " (expected 6)")
         return nil
     end
     local mafia_n = count_rows(
-        "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND role = ?",
-        { game_id, "mafia" })
+        "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND role = ?", game_id, "mafia")
     if mafia_n ~= 2 then
         log_fail(name, "mafia count=" .. tostring(mafia_n))
         return nil
     end
     local villager_n = count_rows(
-        "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND role = ?",
-        { game_id, "villager" })
+        "SELECT COUNT(*) AS n FROM players WHERE game_id = ? AND role = ?", game_id, "villager")
     if villager_n ~= 4 then
         log_fail(name, "villager count=" .. tostring(villager_n))
         return nil
@@ -127,8 +125,7 @@ local function test_night_1_reveal(game_id)
     local name = "V-02-03 night-1-reveal"
     local ok = poll_until(function()
         local na = count_rows(
-            "SELECT COUNT(*) AS n FROM night_actions WHERE game_id = ? AND round = 1",
-            { game_id })
+            "SELECT COUNT(*) AS n FROM night_actions WHERE game_id = ? AND round = 1", game_id)
         return na >= 1, na
     end, 15)
     if not ok then
@@ -136,9 +133,7 @@ local function test_night_1_reveal(game_id)
         return
     end
 
-    local elim = get_row(
-        "SELECT victim_slot, cause, revealed_role FROM eliminations WHERE game_id = ? AND round = 1",
-        { game_id })
+    local elim = get_row("SELECT victim_slot, cause, revealed_role FROM eliminations WHERE game_id = ? AND round = 1", game_id)
     if not elim then
         log_fail(name, "no eliminations row for round 1")
         return
@@ -152,11 +147,10 @@ local function test_night_1_reveal(game_id)
         return
     end
 
-    local victim = get_row(
-        "SELECT alive FROM players WHERE game_id = ? AND slot = ?",
-        { game_id, elim.victim_slot })
+    local victim_slot = tonumber(elim.victim_slot) or 0
+    local victim = get_row("SELECT alive FROM players WHERE game_id = ? AND slot = ?", game_id, victim_slot)
     if not victim then
-        log_fail(name, "victim row missing for slot " .. tostring(elim.victim_slot))
+        log_fail(name, "victim row missing for slot " .. tostring(victim_slot))
         return
     end
     if victim.alive ~= 0 then
@@ -175,14 +169,12 @@ local function test_day_1_chat(game_id)
     local name = "V-02-04 day-1-chat"
     local ok = poll_until(function()
         local n = count_rows(
-            "SELECT COUNT(*) AS n FROM messages WHERE game_id = ? AND round = 1",
-            { game_id })
+            "SELECT COUNT(*) AS n FROM messages WHERE game_id = ? AND round = 1", game_id)
         return n == 4, n
     end, 20)
     if not ok then
         local n = count_rows(
-            "SELECT COUNT(*) AS n FROM messages WHERE game_id = ? AND round = 1",
-            { game_id })
+            "SELECT COUNT(*) AS n FROM messages WHERE game_id = ? AND round = 1", game_id)
         log_fail(name, "messages count=" .. tostring(n) .. " (expected 4 per amended D-02)")
         return
     end
@@ -222,14 +214,12 @@ local function test_vote_1_elim(game_id)
     local name = "V-02-05 vote-1-elim"
     local ok = poll_until(function()
         local n = count_rows(
-            "SELECT COUNT(*) AS n FROM votes WHERE game_id = ? AND round = 1",
-            { game_id })
+            "SELECT COUNT(*) AS n FROM votes WHERE game_id = ? AND round = 1", game_id)
         return n == 5, n
     end, 20)
     if not ok then
         local n = count_rows(
-            "SELECT COUNT(*) AS n FROM votes WHERE game_id = ? AND round = 1",
-            { game_id })
+            "SELECT COUNT(*) AS n FROM votes WHERE game_id = ? AND round = 1", game_id)
         log_fail(name, "votes count=" .. tostring(n) .. " (expected 5)")
         return
     end
@@ -237,8 +227,7 @@ local function test_vote_1_elim(game_id)
     -- Give the post-vote lynch persist a moment to land.
     local lynch_ok = poll_until(function()
         local n = count_rows(
-            "SELECT COUNT(*) AS n FROM eliminations WHERE game_id = ? AND round = 1 AND cause = ?",
-            { game_id, "lynch" })
+            "SELECT COUNT(*) AS n FROM eliminations WHERE game_id = ? AND round = 1 AND cause = ?", game_id, "lynch")
         return n >= 1, n
     end, 10)
     if not lynch_ok then
@@ -298,8 +287,7 @@ local function test_forced_tie(inbox, gm_pid)
     sys_sub:close()
 
     local lynch_n = count_rows(
-        "SELECT COUNT(*) AS n FROM eliminations WHERE game_id = ? AND round = 1 AND cause = ?",
-        { game_id, "lynch" })
+        "SELECT COUNT(*) AS n FROM eliminations WHERE game_id = ? AND round = 1 AND cause = ?", game_id, "lynch")
     if lynch_n ~= 0 then
         log_fail(name, "unexpected lynch row on force_tie round (count=" .. tostring(lynch_n) .. ")")
         return

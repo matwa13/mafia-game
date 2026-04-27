@@ -68,10 +68,11 @@ end
 -- SQL helpers. Acquire-per-call + release (Phase 1 Plan 05 idiom).
 -- Params passed as a single array table per D-30 (Phase 1 Plan 05).
 -- ──────────────────────────────────────────────────────────────────
-local function count_rows(sql_str, params)
+-- count_rows(sql_str, ...) — variadic params (same rationale as get_row).
+local function count_rows(sql_str, ...)
     local db, err = sql.get("app:db")
     if err or not db then return -1, "sql.get: " .. tostring(err) end
-    local rows, q_err = db:query(tostring(sql_str), params or {})
+    local rows, q_err = db:query(tostring(sql_str), { ... })
     db:release()
     if q_err or not rows or not rows[1] then return -1, tostring(q_err) end
     local r = rows[1]
@@ -79,10 +80,13 @@ local function count_rows(sql_str, params)
     return n, nil
 end
 
-local function get_row(sql_str, params)
+-- get_row(sql_str, ...) — variadic params avoid wippy lint's positional-tuple
+-- unification across call sites (some pass 1 param, some 2 — a non-variadic
+-- params table would be narrowed to the shortest tuple).
+local function get_row(sql_str, ...)
     local db, err = sql.get("app:db")
     if err or not db then return nil, "sql.get: " .. tostring(err) end
-    local rows, q_err = db:query(sql_str, params or {})
+    local rows, q_err = db:query(tostring(sql_str), { ... })
     db:release()
     if q_err then return nil, tostring(q_err) end
     return rows and rows[1] or nil, nil
@@ -91,11 +95,11 @@ end
 -- Poll a predicate up to cap seconds. predicate() returns (ok, value).
 local function poll_until(predicate, cap_s, step)
     local deadline = time.now():unix() + (cap_s or 10)
-    step = step or "200ms"
+    local effective_step = type(step) == "string" and step or "200ms"
     while time.now():unix() < deadline do
         local ok, val = predicate()
         if ok then return true, val end
-        time.sleep(step)
+        time.sleep(effective_step)
     end
     return false, nil
 end
@@ -123,10 +127,10 @@ end
 
 -- Poll games.winner until non-null or timeout.
 local function wait_for_winner(game_id, cap_s)
-    cap_s = cap_s or 30
-    local deadline = time.now():unix() + cap_s
+    local effective_cap = type(cap_s) == "number" and cap_s or 30
+    local deadline = time.now():unix() + effective_cap
     while time.now():unix() < deadline do
-        local row = get_row("SELECT winner, ended_at FROM games WHERE id = ?", { game_id })
+        local row = get_row("SELECT winner, ended_at FROM games WHERE id = ?", game_id)
         if row and row.winner then return row.winner, row.ended_at end
         time.sleep("500ms")
     end

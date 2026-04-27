@@ -63,8 +63,7 @@ local function test_v04_01_villager_auto_night(inbox, gm_pid)
     -- Wait up to 20s for night_actions to have at least 1 row (Night 1).
     local ok = poll_until(function()
         local n = count_rows(
-            "SELECT COUNT(*) AS n FROM night_actions WHERE game_id = ? AND round = 1",
-            { game_id })
+            "SELECT COUNT(*) AS n FROM night_actions WHERE game_id = ? AND round = 1", game_id)
         return n >= 1, n
     end, 20, "300ms")
     if not ok then
@@ -73,9 +72,7 @@ local function test_v04_01_villager_auto_night(inbox, gm_pid)
     end
 
     -- Assert night_actions.reasoning_json is populated (Plan 04-01 migration + 04-04 writer).
-    local na_row = get_row(
-        "SELECT reasoning_json FROM night_actions WHERE game_id = ? AND round = 1 LIMIT 1",
-        { game_id })
+    local na_row = get_row("SELECT reasoning_json FROM night_actions WHERE game_id = ? AND round = 1 LIMIT 1", game_id)
     if not na_row then
         log_fail(name, "night_actions row missing")
         return game_id
@@ -86,18 +83,15 @@ local function test_v04_01_villager_auto_night(inbox, gm_pid)
     end
 
     -- Assert eliminations has 1 row for round 1 with cause='night'.
-    local elim = get_row(
-        "SELECT victim_slot, cause FROM eliminations WHERE game_id = ? AND round = 1 AND cause = 'night'",
-        { game_id })
+    local elim = get_row("SELECT victim_slot, cause FROM eliminations WHERE game_id = ? AND round = 1 AND cause = 'night'", game_id)
     if not elim then
         log_fail(name, "no eliminations row with cause='night' for round 1")
         return game_id
     end
 
     -- Assert victim player row shows alive=0.
-    local victim = get_row(
-        "SELECT alive FROM players WHERE game_id = ? AND slot = ?",
-        { game_id, elim.victim_slot })
+    local victim_slot = tonumber(elim.victim_slot) or 0
+    local victim = get_row("SELECT alive FROM players WHERE game_id = ? AND slot = ?", game_id, victim_slot)
     if not victim or victim.alive ~= 0 then
         log_fail(name, "victim player.alive=" .. tostring(victim and victim.alive) .. " (expected 0)")
         return game_id
@@ -161,9 +155,7 @@ local function test_v04_03_mafia_human_night(inbox, gm_pid)
     end
 
     -- Find a living non-mafia target slot.
-    local target_row = get_row(
-        "SELECT slot FROM players WHERE game_id = ? AND alive = 1 AND role = 'villager' LIMIT 1",
-        { game_id })
+    local target_row = get_row("SELECT slot FROM players WHERE game_id = ? AND alive = 1 AND role = 'villager' LIMIT 1", game_id)
     if not target_row then
         log_skip(name, "no living villager found; game may have ended early")
         return game_id
@@ -179,8 +171,7 @@ local function test_v04_03_mafia_human_night(inbox, gm_pid)
     -- Wait for night_actions row for round 1.
     local ok = poll_until(function()
         local n = count_rows(
-            "SELECT COUNT(*) AS n FROM night_actions WHERE game_id = ? AND round = 1",
-            { game_id })
+            "SELECT COUNT(*) AS n FROM night_actions WHERE game_id = ? AND round = 1", game_id)
         return n >= 1, n
     end, 15, "300ms")
     if not ok then
@@ -189,9 +180,7 @@ local function test_v04_03_mafia_human_night(inbox, gm_pid)
     end
 
     -- Assert reasoning_json is populated (D-VR-04: human case records stub reasoning).
-    local na_row = get_row(
-        "SELECT reasoning_json FROM night_actions WHERE game_id = ? AND round = 1 LIMIT 1",
-        { game_id })
+    local na_row = get_row("SELECT reasoning_json FROM night_actions WHERE game_id = ? AND round = 1 LIMIT 1", game_id)
     if not na_row or not na_row.reasoning_json or na_row.reasoning_json == "" then
         log_fail(name, "night_actions.reasoning_json empty after mafia-human pick")
         return game_id
@@ -248,7 +237,7 @@ local function test_v04_06_begin_day_gate(game_id)
     -- Wait for night_actions to confirm night resolved.
     local night_ok = poll_until(function()
         local n = count_rows(
-            "SELECT COUNT(*) AS n FROM night_actions WHERE game_id = ?", { game_id })
+            "SELECT COUNT(*) AS n FROM night_actions WHERE game_id = ?", game_id)
         return n >= 1, n
     end, 15, "200ms")
     if not night_ok then
@@ -261,8 +250,7 @@ local function test_v04_06_begin_day_gate(game_id)
 
     -- Check that no 'day' phase rounds row has appeared (orchestrator should be blocked on gate).
     local day_n = count_rows(
-        "SELECT COUNT(*) AS n FROM rounds WHERE game_id = ? AND phase = 'day'",
-        { game_id })
+        "SELECT COUNT(*) AS n FROM rounds WHERE game_id = ? AND phase = 'day'", game_id)
     if day_n >= 1 then
         -- Day already started — may have been too slow OR the gate is missing.
         -- This is not necessarily a failure (game progressed legitimately with player.advance_phase
@@ -281,9 +269,7 @@ local function test_v04_06_begin_day_gate(game_id)
     end
 
     -- Get current round from night_actions.
-    local na_row = get_row(
-        "SELECT round FROM night_actions WHERE game_id = ? ORDER BY round DESC LIMIT 1",
-        { game_id })
+    local na_row = get_row("SELECT round FROM night_actions WHERE game_id = ? ORDER BY round DESC LIMIT 1", game_id)
     local current_round = (na_row and na_row.round) or 1
 
     process.send(orch_pid, "player.advance_phase", { round = current_round })
@@ -291,8 +277,7 @@ local function test_v04_06_begin_day_gate(game_id)
     -- Wait for 'day' phase round row to appear (confirming gate released).
     local gate_released = poll_until(function()
         local n = count_rows(
-            "SELECT COUNT(*) AS n FROM rounds WHERE game_id = ? AND phase = 'day'",
-            { game_id })
+            "SELECT COUNT(*) AS n FROM rounds WHERE game_id = ? AND phase = 'day'", game_id)
         return n >= 1, n
     end, 10, "200ms")
 
@@ -313,8 +298,7 @@ local function test_v04_07_scope_leak()
     local name = "V-04-07 scope-leak runtime check"
     -- Check errors table for SCOPE LEAK messages.
     local n = count_rows(
-        "SELECT COUNT(*) AS n FROM errors WHERE message LIKE 'SCOPE LEAK%'",
-        {})
+        "SELECT COUNT(*) AS n FROM errors WHERE message LIKE 'SCOPE LEAK%'")
     if n == -1 then
         -- errors table may not exist (pre-Phase-1 schema). SKIP.
         log_skip(name, "errors table query failed (may not exist in this schema version)")
@@ -428,7 +412,7 @@ local function test_v04_08_start_new_game(inbox, gm_pid)
     if not intro_seen then
         -- Intro may have arrived before we subscribed; check players table for game2.
         local p2_n = count_rows(
-            "SELECT COUNT(*) AS n FROM players WHERE game_id = ?", { game2_id })
+            "SELECT COUNT(*) AS n FROM players WHERE game_id = ?", game2_id)
         if p2_n == 6 then
             -- Game2 spawned correctly; intro gate likely fired before our subscription.
             log_skip(name,
@@ -577,7 +561,7 @@ local function test_v04_10_rounds_written(inbox, gm_pid)
 
     -- Assert at least 1 row in rounds for this game (WR-06 closure).
     local rounds_n = count_rows(
-        "SELECT COUNT(*) AS n FROM rounds WHERE game_id = ?", { game_id })
+        "SELECT COUNT(*) AS n FROM rounds WHERE game_id = ?", game_id)
     if rounds_n < 1 then
         log_fail(name, "rounds table has 0 rows for game_id=" .. game_id .. " (WR-06 not satisfied)")
         return
