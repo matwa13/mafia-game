@@ -37,19 +37,25 @@ export function ChatTranscript({ showMafiaChat = false }: ChatTranscriptProps = 
   // and is replaced in-place when the chat.line arrives.
   //
   // Defensive orphan-typing guard: if a committed message already exists for
-  // (round, slot, seq) or (round, slot) + kind "npc", skip the typing entry
-  // at render time. This protects against edge cases where typing.ended /
-  // chat.line never deleted the entry in the store.
+  // (round, slot, seq), or for (round, slot) + kind "npc" with seq >= the
+  // typing entry's seq, skip the typing entry at render time. Tracks max
+  // committed seq per (round, slot) so the second pass of the day's two-pass
+  // round-robin (msg_index=2 follow-up) still shows a typing bubble after the
+  // msg_index=1 opener already committed at a lower seq for the same slot.
   type RenderItem =
     | { kind: "committed"; round: number; seq?: number; msg: ChatMessage; id: string }
     | { kind: "typing"; round: number; seq: number; typingKey: string; fromSlot: number };
 
   const renderItems = useMemo<RenderItem[]>(() => {
     const committedKeys = new Set<string>();
-    const committedSlotRounds = new Set<string>();
+    const committedSlotRoundMaxSeq = new Map<string, number>();
     messages.forEach((m) => {
       if (m.seq != null) committedKeys.add(`${m.round}:${m.fromSlot}:${m.seq}`);
-      if (m.kind === "npc") committedSlotRounds.add(`${m.round}:${m.fromSlot}`);
+      if (m.kind === "npc" && m.seq != null) {
+        const key = `${m.round}:${m.fromSlot}`;
+        const cur = committedSlotRoundMaxSeq.get(key);
+        if (cur == null || m.seq > cur) committedSlotRoundMaxSeq.set(key, m.seq);
+      }
     });
 
     const items: RenderItem[] = [];
@@ -90,7 +96,8 @@ export function ChatTranscript({ showMafiaChat = false }: ChatTranscriptProps = 
       const exactKey = `${entry.round}:${entry.fromSlot}:${entry.seq}`;
       if (committedKeys.has(exactKey)) return;
       const slotRoundKey = `${entry.round}:${entry.fromSlot}`;
-      if (committedSlotRounds.has(slotRoundKey)) return;
+      const maxCommittedSeq = committedSlotRoundMaxSeq.get(slotRoundKey);
+      if (maxCommittedSeq != null && entry.seq <= maxCommittedSeq) return;
       items.push({
         kind: "typing",
         round: entry.round,
