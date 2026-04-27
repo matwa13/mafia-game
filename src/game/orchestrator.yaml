@@ -22,4 +22,6 @@ entries:
       chat: app.game:chat               # NEW (cut 6, D-02)
       game_state: app.game:game_state             # NEW (cut 6)
       dev_telemetry: app.game:dev_telemetry       # NEW (cut 6)
+      night: app.game:night                       # NEW (cut 7)
+      day: app.game:day                           # NEW (cut 7)
     method: run
