@@ -47,3 +47,118 @@ entries:
       prompt: wippy.llm:prompt
       persona: app.npc:persona
       visible_context: app.npc:visible_context
+
+  # D-05 (Phase 6): LLM error classification + persistence + retry.
+  # Includes extract_generate_text (shared by turn_chat + turn_last_words).
+  - name: errors
+    kind: library.lua
+    source: file://errors.lua
+    modules:
+      - logger
+      - time
+      - sql
+
+  # D-05 (Phase 6): Per-NPC suspicion state — rehydrate, persist, apply.
+  - name: suspicion
+    kind: library.lua
+    source: file://suspicion.lua
+    modules:
+      - logger
+      - sql
+      - json
+      - time
+
+  # D-05 (Phase 6): NPC event log helpers — unpack, render, append.
+  - name: event_log
+    kind: library.lua
+    source: file://event_log.lua
+    modules:
+      - logger
+      - json
+
+  # D-05 (Phase 6): Day-chat turn handler — run_chat_turn.
+  - name: turn_chat
+    kind: library.lua
+    source: file://turn_chat.lua
+    modules:
+      - logger
+      - time
+      - sql
+      - json
+    imports:
+      llm: wippy.llm:llm
+      pe: app.lib:events
+      prompts: app.npc:prompts
+      errors: app.npc:errors
+      event_log: app.npc:event_log
+
+  # D-05 (Phase 6): Vote turn handler — run_vote_turn.
+  - name: turn_vote
+    kind: library.lua
+    source: file://turn_vote.lua
+    modules:
+      - logger
+      - time
+      - sql
+      - json
+    imports:
+      llm: wippy.llm:llm
+      pe: app.lib:events
+      prompts: app.npc:prompts
+      errors: app.npc:errors
+      suspicion: app.npc:suspicion
+      event_log: app.npc:event_log
+
+  # D-05 (Phase 6): Night-pick turn handler — run_night_pick (LOOP-02 Mafia-picks).
+  - name: turn_night_pick
+    kind: library.lua
+    source: file://turn_night_pick.lua
+    modules:
+      - logger
+      - time
+      - sql
+      - json
+    imports:
+      llm: wippy.llm:llm
+      pe: app.lib:events
+      prompt: wippy.llm:prompt
+      prompts: app.npc:prompts
+      errors: app.npc:errors
+      visible_context: app.npc:visible_context
+      event_log: app.npc:event_log
+
+  # D-05 (Phase 6): Mafia night side-chat turn handler — run_night_side_chat (LOOP-03).
+  - name: turn_side_chat
+    kind: library.lua
+    source: file://turn_side_chat.lua
+    modules:
+      - logger
+      - time
+      - sql
+      - json
+    imports:
+      llm: wippy.llm:llm
+      pe: app.lib:events
+      prompt: wippy.llm:prompt
+      prompts: app.npc:prompts
+      errors: app.npc:errors
+      visible_context: app.npc:visible_context
+      event_log: app.npc:event_log
+
+  # D-05 (Phase 6): Last-words turn handler — run_last_words (NPC-09).
+  - name: turn_last_words
+    kind: library.lua
+    source: file://turn_last_words.lua
+    modules:
+      - logger
+      - time
+      - sql
+      - json
+    imports:
+      llm: wippy.llm:llm
+      pe: app.lib:events
+      prompt: wippy.llm:prompt
+      prompts: app.npc:prompts
+      errors: app.npc:errors
+      visible_context: app.npc:visible_context
+      event_log: app.npc:event_log
