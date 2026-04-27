@@ -1,5 +1,6 @@
-import { useLayoutEffect, useMemo, useRef } from "react";
+import { useMemo } from "react";
 import { useStore } from "../store";
+import { useStickyScroll } from "../hooks/useStickyScroll";
 import { ChatBubble } from "./ChatBubble";
 import { MafiaChatBubble } from "./MafiaChatBubble";
 import { SystemMessage } from "./SystemMessage";
@@ -106,24 +107,14 @@ export function ChatTranscript({ showMafiaChat = false }: ChatTranscriptProps = 
     return items;
   }, [messages, typing, sideChatMessages, shouldRenderMafiaChat]);
 
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const bottomSentinelRef = useRef<HTMLDivElement>(null);
-
-  // Always scroll to bottom when renderItems changes (new message committed
-  // OR streaming text appended). Previous "stuck to bottom" gate was fragile
-  // — the onScroll listener fired during programmatic scrollIntoView, saw a
-  // transient distanceFromBottom > threshold, and flipped the stuck flag off,
-  // permanently disabling subsequent auto-scrolls. For this single-player
-  // chat UX, always-scroll is the simpler and more reliable default.
-  // useLayoutEffect runs synchronously after DOM mutations and before paint,
-  // so the scroll happens before the browser draws the new frame.
-  useLayoutEffect(() => {
-    bottomSentinelRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
-  }, [renderItems]);
+  // Sticky-to-bottom auto-scroll. See useStickyScroll for the
+  // IntersectionObserver-based race-free implementation that supersedes the
+  // previously-reverted onScroll arithmetic attempt.
+  const { scrollContainerRef, sentinelRef } = useStickyScroll([renderItems]);
 
   return (
     <div
-      ref={scrollRef}
+      ref={scrollContainerRef}
       role="log"
       aria-live="polite"
       aria-atomic="false"
@@ -190,7 +181,7 @@ export function ChatTranscript({ showMafiaChat = false }: ChatTranscriptProps = 
         );
       })}
       {/* Bottom sentinel — scrollIntoView target for auto-scroll. */}
-      <div ref={bottomSentinelRef} aria-hidden="true" />
+      <div ref={sentinelRef} aria-hidden="true" />
     </div>
   );
 }
