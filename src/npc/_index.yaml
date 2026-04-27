@@ -35,3 +35,15 @@ entries:
     source: file://sampler.lua
     imports:
       det_rng: app.lib:det_rng
+
+  # D-04 (Phase 6): Sole home for assert_stable_hash + build_chat_prompt + build_vote_prompt.
+  # Pattern H: byte-identical persona block — function bodies moved verbatim from npc.lua.
+  - name: prompts
+    kind: library.lua
+    source: file://prompts.lua
+    modules:
+      - hash
+    imports:
+      prompt: wippy.llm:prompt
+      persona: app.npc:persona
+      visible_context: app.npc:visible_context
