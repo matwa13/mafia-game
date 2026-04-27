@@ -7,17 +7,27 @@
 -- (logger:named substitution from "test_driver" → "test_harness" is the only
 -- behavior change permitted; per 06-PATTERNS.md S-4).
 
-local logger  = require("logger"):named("test_harness")
 local time    = require("time")
 local channel = require("channel")
 local sql     = require("sql")
 
 -- ──────────────────────────────────────────────────────────────────
 -- Log helpers (exact Phase 1 format strings per D-21).
+--
+-- Logger is resolved per-call (not captured at module load): a logger
+-- handle captured at library load time silently no-ops when invoked
+-- from an importing process. Inline `require("logger"):named(...)`
+-- inside each call resolves to a working handle for the active process.
 -- ──────────────────────────────────────────────────────────────────
-local function log_ok(name) logger:info(string.format("[TEST] %s OK", name)) end
-local function log_fail(name, reason) logger:error(string.format("[TEST] %s FAIL: %s", name, tostring(reason))) end
-local function log_skip(name, reason) logger:info(string.format("[TEST] %s SKIP: %s", name, tostring(reason))) end
+local function log_ok(name)
+    require("logger"):named("test_harness"):info(string.format("[TEST] %s OK", name))
+end
+local function log_fail(name, reason)
+    require("logger"):named("test_harness"):error(string.format("[TEST] %s FAIL: %s", name, tostring(reason)))
+end
+local function log_skip(name, reason)
+    require("logger"):named("test_harness"):info(string.format("[TEST] %s SKIP: %s", name, tostring(reason)))
+end
 
 -- Pull a table field via pairs(); the language-server narrows r.value inside
 -- channel.select branches and warns on direct dot-access.
