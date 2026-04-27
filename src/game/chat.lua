@@ -8,10 +8,24 @@
 -- function signature is unchanged; mutation lands in caller's state by Lua
 -- table-by-reference semantics. Do NOT introduce a local chat_seq inside this file.
 
-local logger = require("logger"):named("chat")
-local time   = require("time")
-local sql    = require("sql")
-local pe     = require("pe")
+local logger  = require("logger"):named("chat")
+local time    = require("time")
+local sql     = require("sql")
+local pe      = require("pe")
+local env     = require("env")
+local channel = require("channel")
+
+-- Quick task 260427-wg1: artificial "fake thinking" delay between an NPC's
+-- LLM result and the chat.line commit. Read defensively: malformed/missing
+-- env value → default 2500ms; > 30000ms cap → default; explicit 0 disables.
+-- env.variable entry registered in chat.yaml (Phase 02 P05 lesson).
+local function fake_thinking_delay_ms()
+    local raw = env.get("MAFIA_FAKE_THINKING_DELAY_MS")
+    if raw == nil or raw == "" then return 2500 end
+    local n = tonumber(raw)
+    if n == nil or n < 0 or n > 30000 then return 2500 end
+    return math.floor(n)
+end
 
 -- Write one message row and publish chat.line. SOLE site that mutates chat_seq
 -- and SOLE publisher of `chat.line`. SETUP-05: INSERT precedes publish_event.
@@ -63,7 +77,31 @@ local function commit_player_chat(game_id, round, from_slot, text, chat_seq)
     return commit_chat_line(game_id, round, from_slot, tostring(text or ""), chat_seq, "human")
 end
 
+-- commit_npc_chat_with_delay: NPC-only commit path. Sleeps for the configured
+-- MAFIA_FAKE_THINKING_DELAY_MS (default 2500ms, 0 disables) AFTER the LLM has
+-- already returned, then delegates to commit_chat_line. The typing bubble is
+-- already visible during this window, so the delay extends "perceived
+-- deliberation" without changing any flow invariants.
+--
+-- D-15 invariant: this helper WRAPS commit_chat_line; commit_chat_line remains
+-- the SOLE publisher of chat.line. Do NOT inline an INSERT or publish_event here.
+--
+-- Signature mirrors commit_chat_line (1:1 passthrough). Human commit sites
+-- (player.chat, player.mafia_chat) MUST keep using commit_chat_line /
+-- commit_player_chat directly — the delay applies to NPC turns only.
+local function commit_npc_chat_with_delay(game_id, round, from_slot, text, chat_seq, kind, preassigned_seq, scope)
+    local delay_ms = fake_thinking_delay_ms()
+    if delay_ms > 0 then
+        -- Single-case channel.select is the cancellable-sleep idiom in Wippy.
+        -- Numeric ms → string-with-unit matches the existing time.after("Nms")
+        -- pattern used elsewhere in the FSM (day.lua, vote.lua).
+        channel.select({ time.after(tostring(delay_ms) .. "ms"):case_receive() })
+    end
+    return commit_chat_line(game_id, round, from_slot, text, chat_seq, kind, preassigned_seq, scope)
+end
+
 return {
     commit_chat_line = commit_chat_line,
     commit_player_chat = commit_player_chat,
+    commit_npc_chat_with_delay = commit_npc_chat_with_delay,
 }
