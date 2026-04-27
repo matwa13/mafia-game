@@ -409,7 +409,7 @@ local function run_night_mafia_human(game_id, round, alive, roles, player_slot,
 
         if tp == "night.side_chat.reply" and partner_thinking then
             -- NPC partner replied. Commit chat line using the pre-reserved seq.
-            local text = tostring(raw.text or "")
+            local text = tostring(raw.side_chat_text or "")
             local suggested_target_slot = raw.suggested_target_slot
             if text ~= "" and pending_reply_seq then
                 local _, werr = chat.commit_chat_line(
