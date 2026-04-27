@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type {
   GameState,
+  GamePhase,
   ChatMessage,
   VoteState,
   SideChatMessage,
@@ -191,7 +192,7 @@ export const useStore = create<StoreState>((set, get) => ({
         return {
           game: {
             ...s.game,
-            phase: data.phase ?? s.game.phase,
+            phase: (data.phase as GamePhase | null | undefined) ?? s.game.phase,
             round: nextRound ?? s.game.round,
             roster,
             playerSlot: data.player_slot != null ? Number(data.player_slot) : s.game.playerSlot,
@@ -199,7 +200,7 @@ export const useStore = create<StoreState>((set, get) => ({
             partnerName: data.partner_name != null ? String(data.partner_name) : s.game.partnerName,
             chatLocked: Boolean(data.chat_locked),
             lastEliminated: data.last_eliminated != null
-              ? asRecord(data.last_eliminated) as GameState["lastEliminated"]
+              ? (asRecord(data.last_eliminated) as unknown as GameState["lastEliminated"])
               : s.game.lastEliminated,
             winner: data.winner != null ? data.winner as "mafia" | "villager" : s.game.winner,
             gameId: data.game_id != null ? String(data.game_id) : s.game.gameId,
