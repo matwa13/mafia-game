@@ -7,7 +7,7 @@ import { InterjectionInput } from "./components/InterjectionInput";
 import { VotePanel } from "./components/VotePanel";
 import { LastWordsCard } from "./components/LastWordsCard";
 import { EliminationRibbon } from "./components/EliminationRibbon";
-import { EndGameBanner } from "./components/EndGameBanner";
+import { EndGameScreen } from "./components/EndGameScreen";
 import { CharacterIntro } from "./components/CharacterIntro";
 import { NightOverlay } from "./components/NightOverlay";
 import { NightPicker } from "./components/NightPicker";
@@ -49,6 +49,10 @@ export default function App() {
     return <CharacterIntro onStart={() => send("game_start_game", {})} />;
   }
 
+  if (phase === "ended") {
+    return <EndGameScreen />;
+  }
+
   // Dead-Mafia fallback: a Mafia-human who's been eliminated falls through
   // to the Villager-style overlay so they can still observe + click Begin
   // Day, but cannot send mafia_chat or pick a target.
@@ -78,7 +82,6 @@ export default function App() {
       </main>
       {phase === "night" && <BeginDayRow />}
       <LastWordsCardWrapper />
-      {phase === "ended" && <EndGameBanner />}
     </div>
   );
 }
