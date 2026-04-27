@@ -19,119 +19,17 @@ local det_rng = require("det_rng")  -- D-SD-05: same-seed-same-setup determinism
 local sampler      = require("sampler")
 local persona_pool = require("persona_pool")
 local persona      = require("persona")
+local chat         = require("chat")         -- D-02 / D-15: SOLE writer of chat.line events (cut 6)
+local game_state   = require("game_state")   -- frame builder: build_gsc_roster + emit_game_state_changed* (cut 6)
+local dev_telemetry = require("dev_telemetry") -- dev mode flag + ring buffer + dev_snapshot (cut 6)
 
-local function dev_mode()
-    return env.get("MAFIA_DEV_MODE") == "1"
-end
-
--- D-DP-10: ring buffer of recent {scope, kind, path, ts} records.
--- Populated on every pe.publish_event / pe.publish_dev_event call site via
--- append_dev_event(state, ...). Capacity hard-capped at 20 (oldest overwritten).
--- CONSTRAINT: call request_dev_snapshots only when inbox is otherwise idle
--- (between phase transitions). The FSM is structured this way already.
-local DEV_EVENT_TAIL_CAP = 20
-
-local function append_dev_event(state, scope, kind, path)
-    -- 1-based slot; modular index wraps at DEV_EVENT_TAIL_CAP.
-    local idx = (state.dev_event_tail_idx % DEV_EVENT_TAIL_CAP) + 1
-    state.dev_event_tail[idx] = {
-        scope = scope, kind = kind, path = path, ts = os.time(),
-    }
-    state.dev_event_tail_idx = state.dev_event_tail_idx + 1
-end
-
--- Returns the ring buffer as a chronologically-ordered array (oldest → newest).
-local function snapshot_dev_event_tail(state)
-    local out = {}
-    local total = state.dev_event_tail_idx
-    if total == 0 then return out end
-    local count = math.min(total, DEV_EVENT_TAIL_CAP)
-    local start = (total - count) % DEV_EVENT_TAIL_CAP
-    for i = 0, count - 1 do
-        local slot = ((start + i) % DEV_EVENT_TAIL_CAP) + 1
-        out[#out + 1] = state.dev_event_tail[slot]
-    end
-    return out
-end
-
--- D-DP-05: collect per-NPC telemetry via unicast process.send.
--- Mirrors gather_readiness pattern (lines ~163-181): 500ms deadline, marks
--- missing slots as {slot, unavailable=true}. Only call between phase transitions.
-local function request_dev_snapshots(state)
-    local cap = "500ms"
-    local replies = {}
-    local pending = {}
-    for slot, pid in pairs(state.npc_pids or {}) do
-        process.send(pid, "dev.snapshot.request", { round = state.round, phase = state.phase })
-        pending[slot] = true
-    end
-    local inbox = process.inbox()
-    local deadline = time.after(cap)
-    local pending_count = 0
-    for _ in pairs(pending) do pending_count = pending_count + 1 end
-    while pending_count > 0 do
-        local r = channel.select({ inbox:case_receive(), deadline:case_receive() })
-        if not r.ok or r.channel ~= inbox then break end
-        local msg = r.value
-        local topic_ok, topic = pcall(function() return msg:topic() end)
-        if topic_ok and topic == "dev.snapshot.reply" then
-            local data = (msg:payload() and msg:payload():data()) or {}
-            local dslot = data.slot
-            if dslot and pending[dslot] then
-                -- Use string keys so Wippy's JSON encoder treats roster as a
-                -- map. Slot 1 is the human (no NPC), so integer keys would be
-                -- sparse {2,3,4,5,6} and the http.ws transcoder rejects sparse
-                -- arrays ("non-contiguous numeric keys"), closing the WS.
-                replies[tostring(dslot)] = data
-                pending[dslot] = nil
-                pending_count = pending_count - 1
-            end
-        end
-        -- non-reply messages dropped; this function is only called between transitions
-    end
-    -- Fill identity fields from orchestrator-owned state for any slot that
-    -- didn't reply within the deadline. Two real causes of no-reply:
-    --   1. Voted-out NPCs whose process has exited (no one to answer).
-    --   2. Alive NPCs busy in a multi-second llm.generate call (their main
-    --      loop won't read dev.snapshot.request until the call returns).
-    -- Without this fill the SPA card shows "—" for name/role/alive even
-    -- though the orchestrator already knows those values. Live telemetry
-    -- (suspicion, prompt digest, last vote/pick/error) stays absent.
-    for slot in pairs(pending) do
-        local persona = state.slot_persona and state.slot_persona[slot] or nil
-        replies[tostring(slot)] = {
-            slot        = slot,
-            unavailable = true,
-            name        = (state.roster_names and state.roster_names[slot]) or (persona and persona.name) or nil,
-            role        = state.roles and state.roles[slot] or nil,
-            alive       = state.alive and state.alive[slot] == true or false,
-            archetype   = persona and persona.archetype or nil,
-        }
-    end
-    return replies
-end
-
--- D-DP-03/D-DP-06: emit a dev.snapshot event after each phase transition.
--- Collects NPC telemetry, aggregates roster + mafia_slots + event_tail.
-local function emit_dev_snapshot(state)
-    if not dev_mode() then return end
-    local roster = request_dev_snapshots(state)
-    local mafia_slots = {}
-    for s, r in pairs(state.roles or {}) do
-        if r == "mafia" then mafia_slots[#mafia_slots + 1] = s end
-    end
-    table.sort(mafia_slots)
-    pe.publish_dev_event("snapshot", "/" .. state.game_id, {
-        game_id     = state.game_id,
-        seed        = state.rng_seed,
-        round       = state.round,
-        phase       = state.phase,
-        mafia_slots = mafia_slots,
-        roster      = roster,
-        event_tail  = snapshot_dev_event_tail(state),
-    })
-    append_dev_event(state, "dev", "snapshot", "/" .. state.game_id)
-end
+-- Convenience aliases so existing FSM code is unchanged.
+local dev_mode                    = dev_telemetry.dev_mode
+local append_dev_event            = dev_telemetry.append_dev_event
+local emit_dev_snapshot           = dev_telemetry.emit_dev_snapshot
+local emit_game_state_changed     = game_state.emit_game_state_changed
+local emit_game_state_changed_elim = game_state.emit_game_state_changed_elim
+local compute_partner_slot        = game_state.compute_partner_slot
 
 -- MAFIA_NPC_MODE routing (D-08): "real" (default) or "stub". Phase 2 test_driver
 -- sets this to "stub" via .env to keep the Phase 2 V-02-XX harness green.
@@ -165,14 +63,6 @@ local function shuffle_roles(rng_seed)
     return roles  -- roles[slot] = "mafia"|"villager" for slot in 1..6
 end
 
-local function compute_partner_slot(roles, target_slot)
-    -- For a mafia at target_slot, return the OTHER mafia's slot.
-    if roles[target_slot] ~= "mafia" then return nil end
-    for s = 1, 6 do
-        if roles[s] == "mafia" and s ~= target_slot then return s end
-    end
-    return nil
-end
 
 -- INSERT 6 players rows (canonical participant count per D-02) + UPDATE games.player_slot + games.player_role.
 -- Uses db:begin() tx for atomicity (Pattern 3).
@@ -690,56 +580,6 @@ local function speaking_order(alive, player_slot)
     return order
 end
 
--- Write one message row and publish chat.line. SOLE site that mutates chat_seq
--- and SOLE publisher of `chat.line`. SETUP-05: INSERT precedes publish_event.
--- Returns the assigned seq on success, or nil + err on failure.
--- Optional `kind` param (default "npc") allows "human" and "last_words" callers.
--- Optional `preassigned_seq`: if provided, use it instead of auto-incrementing.
--- This lets an NPC turn RESERVE its seq at start (before streaming) so that any
--- user interjection committed during the turn gets a seq numerically HIGHER
--- than the NPC's — guaranteeing the NPC's bubble renders above the user's
--- when the SPA sorts by seq.
-local function commit_chat_line(game_id, round, from_slot, text, chat_seq, kind, preassigned_seq, scope)
-    kind = kind or "npc"
-    scope = scope or "public"
-    local seq
-    if preassigned_seq then
-        seq = preassigned_seq
-    else
-        chat_seq[round] = (chat_seq[round] or 0) + 1
-        seq = chat_seq[round]
-    end
-
-    local db, db_err = sql.get("app:db")
-    if db_err or not db then
-        return nil, "sql.get: " .. tostring(db_err)
-    end
-    local _, exec_err = db:execute(
-        "INSERT INTO messages (game_id, round, seq, phase, from_slot, kind, text, created_at) VALUES (?, ?, ?, 'day', ?, ?, ?, ?)",
-        { game_id, round, seq, from_slot, kind, text, time.now():unix() }
-    )
-    db:release()
-    if exec_err then
-        return nil, "messages.insert: " .. tostring(exec_err)
-    end
-
-    -- SETUP-05: publish AFTER successful INSERT.
-    pe.publish_event(scope, "chat.line", "/" .. game_id, {
-        round = round,
-        seq = seq,
-        from_slot = from_slot,
-        text = text,
-        kind = kind,
-    })
-    return seq, nil
-end
-
--- commit_player_chat: convenience wrapper for human interjections (kind="human").
--- D-15 invariant: routes through commit_chat_line, the SOLE writer of messages.
-local function commit_player_chat(game_id, round, from_slot, text, chat_seq)
-    return commit_chat_line(game_id, round, from_slot, tostring(text or ""), chat_seq, "human")
-end
-
 -- Phase 4 LOOP-03 (Mafia branch): partner NPC opens with a side-chat suggestion;
 -- human and partner alternate strictly; loop ends when human submits
 -- player.night_pick. If partner is dead (D-SC-06), no side-chat — just wait for
@@ -822,7 +662,7 @@ local function run_night_mafia_human(game_id, round, alive, roles, player_slot,
             local suggested_target_slot = tonumber(raw.suggested_target_slot)
             local commit_seq = pending_reply_seq  -- reuse pre-reserved seq; no +1
             pending_reply_seq = nil
-            local _, werr = commit_chat_line(
+            local _, werr = chat.commit_chat_line(
                 game_id, round, from_slot, text, chat_seq, "mafia_chat", commit_seq, "mafia")
             if werr then
                 logger:warn("[orchestrator] mafia_chat commit failed (partner)",
@@ -845,7 +685,7 @@ local function run_night_mafia_human(game_id, round, alive, roles, player_slot,
             else
                 chat_seq[round] = (chat_seq[round] or 0) + 1
                 local commit_seq = chat_seq[round]
-                local _, werr = commit_chat_line(
+                local _, werr = chat.commit_chat_line(
                     game_id, round, player_slot, text, chat_seq, "mafia_chat", commit_seq, "mafia")
                 if werr then
                     logger:warn("[orchestrator] mafia_chat commit failed (human)",
@@ -964,139 +804,6 @@ local function run_night_mafia_human(game_id, round, alive, roles, player_slot,
     return true, victim_slot
 end
 
--- Publish system/game_state_changed snapshot on every phase transition.
--- Takes explicit fields to avoid wippy-lint struct-shape union issues (same
--- pattern as run_night_stub / run_day_discussion).
--- CRITICAL: alive_map is state.alive — the canonical and SOLE liveness field
--- (Phase 2 invariant at :785). No parallel eliminated-slot table exists.
--- roles_map: state.roles. slot_persona_map: state.slot_persona (may be nil).
--- roster_names_map: state.roster_names (may be nil). player_sl: state.player_slot.
--- Build roster snapshot from the canonical Phase 2 alive/roles tables.
--- alive_map is state.alive — the SOLE liveness field. Role is revealed only
--- when alive_map[slot] == false (slot is dead), OR when reveal_all is true
--- (game-ended full reveal). No parallel eliminated-slot table.
-local function build_gsc_roster(alive_map, roles_map, slot_persona_map,
-                                 roster_names_map, player_sl, reveal_all)
-    -- Use STRING keys for the outer map so the Wippy JSON serializer emits a
-    -- JSON object, not a JSON array. A 1-indexed dense integer-keyed Lua table
-    -- gets serialized as `[val1, val2, ...]` (0-indexed on the wire); the SPA's
-    -- Object.entries then shifts all slot IDs down by 1, producing the "two
-    -- 'You' chips" bug. String keys ("1", "2", ...) round-trip cleanly through
-    -- parseInt on the SPA side.
-    local roster = {}
-    for slot = 1, 6 do
-        local name
-        if slot == player_sl then
-            -- Prefer the player's chosen name from roster_names_map (the live
-            -- orchestrator state). Fallback to "You" for legacy callers
-            -- (e.g., test_driver) that do not populate roster_names_map.
-            name = (roster_names_map and roster_names_map[slot]) or "You"
-        else
-            local sp = slot_persona_map and slot_persona_map[slot]
-            if sp then
-                name = sp.name or ("slot-" .. tostring(slot))
-            elseif roster_names_map then
-                name = roster_names_map[slot] or ("slot-" .. tostring(slot))
-            else
-                name = "slot-" .. tostring(slot)
-            end
-        end
-        -- Use rawget to avoid wippy-lint's union-narrowing on table index
-        -- (alive_map is state.alive: {[integer]:boolean}, canonical Phase 2 field).
-        local is_alive = (rawget(alive_map, slot) == true)
-        local revealed_role = nil
-        if not is_alive or reveal_all then
-            revealed_role = roles_map[slot]
-        end
-        -- Persona fields for NPC slots. Player slot has no persona (nil).
-        -- voice_blurb is the first canonical utterance — a sample line of
-        -- in-character dialogue for the "meet the cast" intro screen.
-        local archetype_id, archetype_label, voice_blurb = nil, nil, nil
-        local sp = slot_persona_map and slot_persona_map[slot]
-        if sp then
-            archetype_id = sp.archetype_id
-            archetype_label = sp.archetype_label
-            local utts = sp.canonical_utterances
-            if type(utts) == "table" and utts[1] then
-                voice_blurb = utts[1]
-            end
-        end
-        roster[tostring(slot)] = {
-            name = name,
-            alive = is_alive,
-            role = revealed_role,
-            archetype_id = archetype_id,
-            archetype_label = archetype_label,
-            voice_blurb = voice_blurb,
-        }
-    end
-    return roster
-end
-
--- Publish system/game_state_changed on phase transitions (no elimination payload).
--- Takes explicit fields — avoids wippy-lint struct-shape union issues.
---
--- `winner` is only populated for the final phase="ended" emit so the SPA gets
--- phase and winner in one atomic frame (no race against the separate game.ended
--- event, which the EndGameBanner would otherwise render before winner lands).
-local function emit_game_state_changed(game_id, alive_map, roles_map,
-                                        slot_persona_map, roster_names_map,
-                                        player_sl, phase, round, chat_locked, winner)
-    local reveal_all = (phase == "ended")
-    local roster = build_gsc_roster(alive_map, roles_map, slot_persona_map,
-                                     roster_names_map, player_sl, reveal_all)
-    local player_role = roles_map and roles_map[player_sl]
-    local partner_slot = player_role == "mafia" and compute_partner_slot(roles_map, player_sl)
-    local partner_name = partner_slot and slot_persona_map and
-        slot_persona_map[partner_slot] and slot_persona_map[partner_slot].name
-    -- Stamp partner's role onto their roster entry so the Mafia-human SPA can
-    -- derive partnerAlive via roster scan (NightPicker.tsx:31). build_gsc_roster
-    -- only reveals role for dead slots; alive partners need explicit stamping.
-    -- Safe: partner_slot is non-nil only when player_role == "mafia" (D-09).
-    if partner_slot and roster[tostring(partner_slot)] then
-        roster[tostring(partner_slot)].role = roles_map[partner_slot]
-    end
-    pe.publish_event("system", "game_state_changed", "/" .. game_id, {
-        phase = phase or "unknown",
-        round = round or 0,
-        dev_mode = dev_mode(),   -- D-DEV-04: SPA reads this to render DEV chip
-        alive = alive_map,
-        roster = roster,
-        player_slot = player_sl,
-        player_role = player_role,
-        partner_name = partner_name,
-        game_id = game_id,
-        chat_locked = chat_locked or false,
-        winner = winner,
-    })
-end
-
--- Variant that carries last_eliminated payload (lynch/night-kill reveal).
--- chat_locked_flag: pass true during the vote-reveal animation window;
--- pass false when using this at the night-kill-to-day transition so the
--- SPA input is not disabled at the start of a fresh day.
-local function emit_game_state_changed_elim(game_id, alive_map, roles_map,
-                                             slot_persona_map, roster_names_map,
-                                             player_sl, phase, round,
-                                             elim_slot, elim_name, elim_role, elim_cause,
-                                             chat_locked_flag)
-    local reveal_all = (phase == "ended")
-    local roster = build_gsc_roster(alive_map, roles_map, slot_persona_map,
-                                     roster_names_map, player_sl, reveal_all)
-    pe.publish_event("system", "game_state_changed", "/" .. game_id, {
-        phase = phase or "unknown",
-        round = round or 0,
-        alive = alive_map,
-        roster = roster,
-        player_slot = player_sl,
-        game_id = game_id,
-        chat_locked = chat_locked_flag == nil and true or chat_locked_flag,
-        last_eliminated = {
-            slot = elim_slot, name = elim_name, role = elim_role, cause = elim_cause,
-        },
-    })
-end
-
 -- run_day_discussion: one speaker at a time; per-speaker cap + day-level deadline
 -- with a 1s drain so the current speaker gets to finish if the deadline fires.
 --
@@ -1164,7 +871,7 @@ local function run_day_discussion(game_id, round, alive, player_slot, npc_pids,
 
                         if reply_slot == slot and reply_round == round then
                             if not dead and text and text ~= "" then
-                                local _, write_err = commit_chat_line(
+                                local _, write_err = chat.commit_chat_line(
                                     game_id, round, slot, tostring(text), chat_seq)
                                 if write_err then
                                     logger:error("[orchestrator] commit_chat_line failed",
@@ -1342,7 +1049,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                             -- Use the reserved seq so this NPC lands at its
                             -- pre-allocated slot regardless of intervening user
                             -- interjections (which took higher seqs).
-                            local _, werr = commit_chat_line(game_id, round, slot,
+                            local _, werr = chat.commit_chat_line(game_id, round, slot,
                                 tostring(raw.text or ""), chat_seq, kind, reserved_seq)
                             if werr then
                                 logger:error("[orchestrator] commit_chat_line failed",
@@ -1369,7 +1076,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                             -- incremented seq (which is > reserved_seq), so
                             -- the SPA's seq-sorted render puts the user's
                             -- bubble BELOW this NPC's (still-pending) bubble.
-                            local _, werr = commit_player_chat(game_id, round,
+                            local _, werr = chat.commit_player_chat(game_id, round,
                                 from, text, chat_seq)
                             if werr then
                                 logger:warn("[orchestrator] commit_player_chat failed",
@@ -1460,7 +1167,7 @@ local function run_day_discussion_streaming(game_id, round, alive, player_slot, 
                 local text = tostring(raw.text or "")
                 local from = raw.from_slot or player_slot
                 if text ~= "" and alive[from] then
-                    local _, werr = commit_player_chat(game_id, round,
+                    local _, werr = chat.commit_player_chat(game_id, round,
                         from, text, chat_seq)
                     if werr then
                         logger:warn("[orchestrator] commit_player_chat failed",
@@ -1875,7 +1582,7 @@ local function run_vote_round_llm(game_id, round, alive, roles, player_slot, npc
                 local raw = (m:payload():data()) or {}
                 if raw.from_slot == top_slot and raw.kind == "last_words" then
                     local top_slot_i = math.floor(tonumber(top_slot) or 0)
-                    local _, werr = commit_chat_line(game_id, round, top_slot_i,
+                    local _, werr = chat.commit_chat_line(game_id, round, top_slot_i,
                         tostring(raw.text or ""), chat_seq, "last_words")
                     if werr then
                         logger:warn("[orchestrator] last_words commit failed",

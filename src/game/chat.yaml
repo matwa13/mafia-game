@@ -1,0 +1,13 @@
+version: "1.0"
+namespace: app.game
+
+entries:
+  - name: chat
+    kind: library.lua
+    source: file://chat.lua
+    modules:
+      - logger
+      - time
+      - sql
+    imports:
+      pe: app.lib:events
