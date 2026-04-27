@@ -18,18 +18,23 @@ entries:
     storage: app:env
     variable: MAFIA_NPC_MODE
 
+  # Phase 6 cut 3: shrunk to Pattern B (run + dispatch). Harness fns moved
+  # to app.lib:test_harness (T-03); V-XX scenarios moved to
+  # app.game.tests:vXX_* (T-02). modules trimmed to what run() actually uses
+  # (logger + channel + env). imports list aliases the test groups + harness.
   - name: test_driver
     kind: process.lua
     source: file://test_driver.lua
     modules:
       - logger
-      - events
-      - time
-      - sql
+      - channel
       - env
     imports:
-      sampler: app.npc:sampler
-      persona_pool: app.npc:persona_pool
+      harness: app.lib:test_harness
+      v02: app.game.tests:v02_setup
+      v03: app.game.tests:v03_llm
+      v04: app.game.tests:v04_night
+      v05: app.game.tests:v05_dev
     method: run
 
   - name: test_driver_service
