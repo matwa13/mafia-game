@@ -24,4 +24,7 @@ entries:
       dev_telemetry: app.game:dev_telemetry       # NEW (cut 6)
       night: app.game:night                       # NEW (cut 7)
       day: app.game:day                           # NEW (cut 7)
+      vote: app.game:vote                         # NEW (cut 7)
+      end_game: app.game:end_game                 # NEW (cut 7)
+      intro: app.game:intro                       # NEW (cut 7)
     method: run

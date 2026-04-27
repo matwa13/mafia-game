@@ -24,6 +24,9 @@ local game_state   = require("game_state")   -- frame builder: build_gsc_roster 
 local dev_telemetry = require("dev_telemetry") -- dev mode flag + ring buffer + dev_snapshot (cut 6)
 local night        = require("night")        -- LOOP-02/03: night phase handlers (cut 7)
 local day          = require("day")          -- LOOP-04/05: day discussion (cut 7)
+local vote         = require("vote")         -- LOOP-08/09: vote phase handlers (cut 7)
+local end_game     = require("end_game")     -- LOOP-10: win check + shutdown cascade (cut 7)
+local intro        = require("intro")        -- intro gate before Night 1 (cut 7)
 
 -- Convenience aliases so existing FSM code is unchanged.
 local dev_mode                    = dev_telemetry.dev_mode
@@ -241,511 +244,10 @@ end
 -- extracted to src/game/day.lua (cut 7).
 
 
--- Phase 2 Plan 04: Vote phase + tally + win check + shutdown cascade.
---
--- LOOP-08 (simultaneous voting): vote.prompt is sent to every alive NPC BEFORE
--- any reply is processed; tally runs only AFTER all replies collected (or deadline).
--- LOOP-09 (tie handling): if max vote-count is tied at >=2 slots, NO elimination;
--- publish `vote.tied` on `mafia.system` and proceed to next night.
--- LOOP-10 (win check): `check_win` runs after every elimination (post-night + post-vote).
--- LOOP-01 (FSM end-to-end): the main loop drives Night -> Day -> Vote -> check_win
--- until a winner emerges, then the shutdown cascade fires.
---
--- Schema authority: src/storage/migrations/0001_initial_schema.lua
---   votes columns:        (game_id, round, from_slot, vote_for_slot, reasoning, created_at)
---   eliminations columns: (game_id, round, victim_slot, cause, revealed_role, created_at)
---   games columns:        (id, started_at, ended_at, winner, player_slot, player_role, rng_seed)
---
--- SETUP-05 ordering: every SQL commit precedes its paired publish_event. The lynch
--- path wraps INSERT eliminations + UPDATE players in ONE db:begin tx (Pattern 3).
--- Shutdown cascade writes UPDATE games BEFORE publishing game.ended.
---
--- Pitfall 3: process.cancel is NOT automatic on clean parent return. The shutdown
--- cascade explicitly cancels each npc_pid with a 500ms grace.
-
--- Build the alive-slots array (sorted ascending) for a vote.prompt payload.
--- Stub normalizes array -> set via `for _, s in ipairs ... do alive[s] = true end`.
-local function alive_slots_array(alive)
-    local arr = {}
-    for slot = 1, 6 do  -- 6 = canonical participant count (D-02)
-        if alive[slot] then table.insert(arr, slot) end
-    end
-    return arr
-end
-
--- Collect one vote.cast per alive NPC + a deterministic stubbed player vote.
--- LOOP-08: vote.prompt is sent to ALL alive NPCs before any reply is processed.
--- Returns votes_map { from_slot -> vote_for_slot or nil } (may be partial on deadline).
-local function gather_votes(game_id, round, alive, player_slot, npc_pids, force_tie, inbox)
-    local alive_arr = alive_slots_array(alive)
-
-    -- Build set of alive NPC slots we are awaiting (exclude player).
-    local awaiting = {}
-    local expected_count = 0
-    for _, slot in ipairs(alive_arr) do
-        if slot ~= player_slot then
-            awaiting[slot] = true
-            expected_count = expected_count + 1
-        end
-    end
-
-    -- Simultaneous: send vote.prompt to all alive NPCs BEFORE collecting any reply.
-    for slot in pairs(awaiting) do
-        local npc_pid = npc_pids[slot]
-        if npc_pid then
-            process.send(npc_pid, "vote.prompt", {
-                round = round,
-                alive_slots = alive_arr,
-                force_tie = force_tie == true,
-            })
-        end
-    end
-
-    local votes = {}
-
-    -- Stub the human player's vote: in Phase 2 the player is a "cooperative tester",
-    -- always votes for slot 2 unless player_slot==2, in which case slot 3. If the
-    -- preferred target is dead, fall back to first alive non-self slot. This keeps
-    -- V-02-05 deterministic without requiring a WS client or Phase 3 driver wiring.
-    if alive[player_slot] then
-        local player_target = player_slot == 2 and 3 or 2
-        if not alive[player_target] then
-            for _, s in ipairs(alive_arr) do
-                if s ~= player_slot then player_target = s; break end
-            end
-        end
-        votes[player_slot] = player_target
-    end
-
-    -- Collect NPC replies with a 5s deadline. Deadline is one-shot (Pitfall 2).
-    local deadline = time.after("5s")
-    local collected = 0
-    while collected < expected_count do
-        local r = channel.select({ inbox:case_receive(), deadline:case_receive() })
-        if not r.ok or r.channel ~= inbox then
-            logger:warn("[orchestrator] gather_votes deadline", {
-                collected = collected, expected = expected_count,
-            })
-            break
-        end
-        local msg = r.value
-        local topic_ok, topic = pcall(function() return msg:topic() end)
-        if topic_ok and topic == "vote.cast" then
-            local raw = msg:payload():data()
-            if type(raw) == "table" then
-                local from_slot = raw.from_slot
-                local vote_for = raw.vote_for_slot
-                local reply_round = raw.round
-                if from_slot and reply_round == round and awaiting[from_slot] then
-                    votes[from_slot] = vote_for  -- may be nil for dead stubs (D-13)
-                    awaiting[from_slot] = nil
-                    collected = collected + 1
-                end
-            end
-        end
-    end
-    return votes
-end
-
--- Persist one `votes` row per voter. Skips abstentions (vote_for_slot == nil).
--- Plain per-row db:execute (no tx — votes PK {game_id, round, from_slot} dedupes
--- and no cross-table atomicity needed here).
-local function persist_votes(game_id, round, votes_map)
-    local db, db_err = sql.get("app:db")
-    if db_err or not db then return nil, "sql.get: " .. tostring(db_err) end
-    local now_ts = time.now():unix()
-    local any_err = nil
-    for from_slot, vote_for_slot in pairs(votes_map) do
-        if vote_for_slot ~= nil then  -- skip abstentions / dead stubs (D-13)
-            local _, exec_err = db:execute(
-                "INSERT INTO votes (game_id, round, from_slot, vote_for_slot, reasoning, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                { game_id, round, from_slot, vote_for_slot, "stub", now_ts }
-            )
-            if exec_err then any_err = tostring(exec_err); break end
-        end
-    end
-    db:release()
-    if any_err then return nil, "votes.insert: " .. any_err end
-    return true, nil
-end
-
--- Tally: return (top_slot, tied_slots_array, tally_map).
--- tied_slots_array has >=2 entries IFF there is a tie at the max.
--- top_slot is nil on empty map OR on tie.
-local function tally_votes(votes_map)
-    local tally = {}
-    for _, target in pairs(votes_map) do
-        if target ~= nil then tally[target] = (tally[target] or 0) + 1 end
-    end
-    local max_count = 0
-    for _, c in pairs(tally) do if c > max_count then max_count = c end end
-    local tied = {}
-    for slot, c in pairs(tally) do
-        if c == max_count then table.insert(tied, slot) end
-    end
-    table.sort(tied)
-    if max_count == 0 then return nil, {}, tally end  -- no votes at all
-    if #tied == 1 then return tied[1], {}, tally end
-    return nil, tied, tally
-end
-
--- Persist a lynch: INSERT eliminations + UPDATE players, atomic (Pattern 3).
--- Returns revealed_role on success, or nil+err on failure.
-local function persist_lynch(game_id, round, victim_slot, roles)
-    local revealed_role = roles[victim_slot]
-    local db, db_err = sql.get("app:db")
-    if db_err or not db then return nil, "sql.get: " .. tostring(db_err) end
-    local tx, tx_err = db:begin()
-    if tx_err then db:release(); return nil, "begin: " .. tostring(tx_err) end
-    local now_ts = time.now():unix()
-    local ok, err = pcall(function()
-        local _, e1 = tx:execute(
-            "INSERT INTO eliminations (game_id, round, victim_slot, cause, revealed_role, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            { game_id, round, victim_slot, "lynch", revealed_role, now_ts }
-        )
-        assert(not e1, "eliminations.insert: " .. tostring(e1))
-        local _, e2 = tx:execute(
-            "UPDATE players SET alive = 0, died_round = ?, died_cause = ? WHERE game_id = ? AND slot = ?",
-            { round, "lynch", game_id, victim_slot }
-        )
-        assert(not e2, "players.update: " .. tostring(e2))
-    end)
-    if not ok then tx:rollback(); db:release(); return nil, "tx: " .. tostring(err) end
-    local _, commit_err = tx:commit()
-    db:release()
-    if commit_err then return nil, "commit: " .. tostring(commit_err) end
-    return revealed_role, nil
-end
-
--- run_vote_round: full phase — gather, persist, tally, lynch-or-tie, emit events.
--- SETUP-05: persist_lynch's tx commits BEFORE player.eliminated publish.
--- Takes explicit fields (not the state table) to avoid wippy-lint struct-shape
--- union issues — same pattern as run_night_stub / run_day_discussion.
-local function run_vote_round(game_id, round, alive, roles, player_slot, npc_pids, force_tie, inbox)
-    local votes = gather_votes(game_id, round, alive, player_slot, npc_pids, force_tie, inbox)
-    local persist_ok, persist_err = persist_votes(game_id, round, votes)
-    if not persist_ok then return nil, persist_err end
-
-    local top_slot, tied, tally = tally_votes(votes)
-
-    if top_slot then
-        -- Lynch path (LOOP-08).
-        local revealed_role, lynch_err = persist_lynch(game_id, round, top_slot, roles)
-        if not revealed_role then return nil, lynch_err end
-        alive[top_slot] = false
-
-        -- D-13 belt-and-suspenders: notify the lynched stub so it sets dead=true.
-        local pid = npc_pids[top_slot]
-        if pid then
-            process.send(pid, "eliminated", { slot = top_slot, round = round })
-        end
-
-        -- SETUP-05: publish AFTER tx:commit (persist_lynch returned revealed_role).
-        pe.publish_event("public", "player.eliminated", "/" .. game_id, {
-            round = round,
-            victim_slot = top_slot,
-            cause = "lynch",
-            revealed_role = revealed_role,
-            tally = tally,
-        })
-        logger:info("[orchestrator] lynch", {
-            round = round, victim_slot = top_slot, revealed_role = revealed_role,
-        })
-    else
-        -- Tie path (LOOP-09): no eliminations row, proceed to next Night.
-        pe.publish_event("system", "vote.tied", "/" .. game_id, {
-            round = round,
-            tied_slots = tied,
-            tally = tally,
-        })
-        logger:info("[orchestrator] vote tied", {
-            round = round, tied_count = #tied,
-        })
-    end
-    return true, nil
-end
-
--- Phase 3: run_vote_round_llm.
--- Same outer contract as run_vote_round but:
---   - gathers full reasoning string from each vote.cast payload
---   - publishes public/votes_revealed with per_voter array before persist_lynch
---   - preserves Phase 2 tally + tie-handling logic
---   - uses alive as the canonical and SOLE liveness field (Phase 2 invariant)
--- Takes explicit state fields (chat_seq, roster_names, slot_persona) instead of
--- the state table — avoids wippy-lint struct-shape union issues.
-local function run_vote_round_llm(game_id, round, alive, roles, player_slot, npc_pids,
-                                   force_tie, inbox, chat_seq, roster_names, slot_persona,
-                                   dev_state)
-    -- local helper: count table entries
-    local function count_map(t)
-        local n = 0
-        for _ in pairs(t) do n = n + 1 end
-        return n
-    end
-
-    -- Fan-out vote.prompt to all living NPCs (player excluded).
-    for slot = 1, 6 do
-        local npid = npc_pids[slot]
-        if alive[slot] and slot ~= player_slot and npid then
-            process.send(npid, "vote.prompt", { round = round })
-        end
-    end
-
-    -- Count living participants (NPCs + player) to know when collection is complete.
-    local needed = 0
-    for slot = 1, 6 do if alive[slot] then needed = needed + 1 end end
-
-    local votes_by_slot = {}  -- [slot] = { vote_for_slot, reasoning }
-    -- vote_cap must exceed npc.lua VOTE_CAP_S (15s structured_output deadline)
-    -- or NPC vote.casts arrive AFTER the orchestrator has already tallied.
-    -- Also must give the human player realistic time to read reasoning + pick.
-    -- Early-exit via `count_map(votes_by_slot) >= needed` still fires as soon
-    -- as the last vote (usually the player's) arrives.
-    local vote_cap = time.after(dev_mode() and "120s" or "180s")
-    while true do
-        local r = channel.select({ inbox:case_receive(), vote_cap:case_receive() })
-        if not r.ok or r.channel == vote_cap then
-            logger:warn("[orchestrator] vote collection timeout",
-                { round = round, collected = count_map(votes_by_slot), needed = needed })
-            break
-        end
-        local msg = r.value
-        local tp = msg:topic()
-        if tp == "vote.cast" then
-            local raw = (msg:payload():data()) or {}
-            if (raw.round == round) and raw.from_slot and not votes_by_slot[raw.from_slot] then
-                votes_by_slot[raw.from_slot] = {
-                    vote_for_slot = raw.vote_for_slot,
-                    reasoning = tostring(raw.reasoning or ""),
-                }
-                -- Incremental reveal: publish each vote as it lands so the SPA
-                -- can flip the placeholder bubble to a revealed card without
-                -- waiting for the full `votes_revealed` event at the end.
-                pe.publish_event("public", "vote.cast.received", "/" .. game_id, {
-                    round = round,
-                    from_slot = raw.from_slot,
-                    from_name = (roster_names and roster_names[raw.from_slot])
-                        or ("slot-" .. tostring(raw.from_slot)),
-                    vote_for_slot = raw.vote_for_slot,
-                    reasoning = tostring(raw.reasoning or ""),
-                })
-                if dev_state then append_dev_event(dev_state, "public", "vote.cast.received", "/" .. game_id) end
-                if count_map(votes_by_slot) >= needed then break end
-            end
-        end
-    end
-
-    -- Persist votes with reasoning strings.
-    local db, db_err = sql.get("app:db")
-    if db_err or not db then return nil, "sql.get: " .. tostring(db_err) end
-    local now_ts = time.now():unix()
-    for slot, v in pairs(votes_by_slot) do
-        local _, werr = db:execute(
-            "INSERT OR REPLACE INTO votes (game_id, round, from_slot, vote_for_slot, reasoning, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            { game_id, round, slot, v.vote_for_slot, v.reasoning, now_ts }
-        )
-        if werr then
-            logger:error("[orchestrator] persist vote failed", { slot = slot, err = tostring(werr) })
-        end
-    end
-    db:release()
-
-    -- Tally. Keys are STRINGIFIED slot numbers so the JSON transcoder on the
-    -- WebSocket boundary doesn't see a sparse integer-keyed table (e.g.
-    -- {2: 3, 6: 2}) which it refuses to encode ("cannot encode sparse array").
-    local tally = {}
-    for _, v in pairs(votes_by_slot) do
-        if v.vote_for_slot and alive[v.vote_for_slot] then
-            local k = tostring(v.vote_for_slot)
-            tally[k] = (tally[k] or 0) + 1
-        end
-    end
-    local top_slot, top_count, tied = nil, 0, false
-    for s, c in pairs(tally) do
-        -- Keys are stringified (line ~1186); coerce back to integer so lint
-        -- accepts `top_slot` as an index into integer-keyed maps (npc_pids, alive).
-        if c > top_count then top_slot = math.floor(tonumber(s) or 0); top_count = c; tied = false
-        elseif c == top_count then tied = true end
-    end
-    if force_tie then tied = true; top_slot = nil end
-
-    -- Build per_voter array (sorted by slot for deterministic UI output).
-    local per_voter = {}
-    for slot = 1, 6 do
-        if votes_by_slot[slot] then
-            table.insert(per_voter, {
-                from_slot = slot,
-                from_name = (roster_names and roster_names[slot]) or ("slot-" .. slot),
-                vote_for_slot = votes_by_slot[slot].vote_for_slot,
-                reasoning = votes_by_slot[slot].reasoning,
-            })
-        end
-    end
-
-    -- PUBLISH votes_revealed BEFORE lynch so UI can animate reveal.
-    pe.publish_event("public", "votes_revealed", "/" .. game_id, {
-        round = round, tally = tally, per_voter = per_voter,
-        top_slot = (not tied) and top_slot or nil, tied = tied,
-    })
-    if dev_state then append_dev_event(dev_state, "public", "votes_revealed", "/" .. game_id) end
-
-    if tied or not top_slot then
-        pe.publish_event("system", "vote.tied", "/" .. game_id, { round = round, tally = tally })
-        if dev_state then append_dev_event(dev_state, "system", "vote.tied", "/" .. game_id) end
-        emit_game_state_changed(game_id, alive, roles, slot_persona,
-            roster_names, player_slot, "reveal", round, true)
-        if dev_state then append_dev_event(dev_state, "system", "game_state_changed", "/" .. game_id) end
-        return true, nil
-    end
-
-    -- Lynch top slot via Phase 2 persist_lynch (unchanged).
-    local revealed_role, lynch_err = persist_lynch(game_id, round, top_slot, roles)
-    if lynch_err then
-        logger:error("[orchestrator] persist_lynch failed", { err = tostring(lynch_err) })
-        return nil, lynch_err
-    end
-    -- Mark slot eliminated via alive (Phase 2 canonical field at orchestrator.lua:785).
-    -- No parallel eliminated-slot table exists; alive[slot] = false IS the canonical mutation.
-    alive[top_slot] = false
-
-    -- Last-words dispatch (NPC-09) — only for NPC slots, not the player.
-    local victim_pid = npc_pids[top_slot]
-    if top_slot ~= player_slot and victim_pid then
-        process.send(victim_pid, "eliminated", {
-            slot = top_slot, round = round, request_last_words = true,
-        })
-        local lw_deadline = time.after("12s")
-        while true do
-            local lwr = channel.select({ inbox:case_receive(), lw_deadline:case_receive() })
-            if not lwr.ok or lwr.channel == lw_deadline then break end
-            local m = lwr.value
-            if m:topic() == "chat.submit" then
-                local raw = (m:payload():data()) or {}
-                if raw.from_slot == top_slot and raw.kind == "last_words" then
-                    local top_slot_i = math.floor(tonumber(top_slot) or 0)
-                    local _, werr = chat.commit_chat_line(game_id, round, top_slot_i,
-                        tostring(raw.text or ""), chat_seq, "last_words")
-                    if werr then
-                        logger:warn("[orchestrator] last_words commit failed",
-                            { err = tostring(werr) })
-                    end
-                    break
-                end
-            end
-        end
-    end
-
-    -- Publish elimination event.
-    pe.publish_event("public", "player.eliminated", "/" .. game_id, {
-        round = round, victim_slot = top_slot, cause = "lynch", revealed_role = revealed_role,
-    })
-    if dev_state then append_dev_event(dev_state, "public", "player.eliminated", "/" .. game_id) end
-    local victim_name = (roster_names and roster_names[top_slot]) or ("slot-" .. top_slot)
-    emit_game_state_changed_elim(game_id, alive, roles, slot_persona,
-        roster_names, player_slot, "reveal", round,
-        top_slot, victim_name, revealed_role, "lynch")
-    if dev_state then append_dev_event(dev_state, "system", "game_state_changed", "/" .. game_id) end
-
-    -- Cancel the victim NPC process so it exits cleanly.
-    if top_slot ~= player_slot and victim_pid then
-        pcall(process.cancel, victim_pid, "500ms")
-    end
-
-    logger:info("[orchestrator] llm lynch", {
-        round = round, victim_slot = top_slot, revealed_role = revealed_role,
-    })
-    return true, nil
-end
-
--- check_win: D-20 rule.
--- Returns 'villager' if living_mafia == 0,
---         'mafia'    if living_mafia >= living_villagers (parity + majority),
---         nil        otherwise (game continues).
--- Villager-win check runs FIRST because with 0 mafia and 0 villagers (impossible
--- in practice but correct by construction) the villager-win reading is right.
-local function check_win(alive, roles)
-    local living_mafia = 0
-    local living_villagers = 0
-    for slot = 1, 6 do  -- 6 = canonical participant count (D-02)
-        if alive[slot] then
-            if roles[slot] == "mafia" then
-                living_mafia = living_mafia + 1
-            elseif roles[slot] == "villager" then
-                living_villagers = living_villagers + 1
-            end
-        end
-    end
-    if living_mafia == 0 then return "villager", living_mafia, living_villagers end
-    if living_mafia >= living_villagers then return "mafia", living_mafia, living_villagers end
-    return nil, living_mafia, living_villagers
-end
-
--- Shutdown cascade: UPDATE games + publish game.ended + cancel all NPC stubs.
--- Pitfall 3: process.cancel is required — clean parent return does NOT
--- auto-cancel linked children. Each stub gets a 500ms grace.
--- SETUP-05: UPDATE games is committed BEFORE game.ended publish.
-local function shutdown_cascade(game_id, round, winner, living_mafia, living_villagers, npc_pids)
-    local now_ts = time.now():unix()
-
-    local db, db_err = sql.get("app:db")
-    if db and not db_err then
-        local _, exec_err = db:execute(
-            "UPDATE games SET ended_at = ?, winner = ? WHERE id = ?",
-            { now_ts, winner, game_id }
-        )
-        db:release()
-        if exec_err then
-            logger:error("[orchestrator] games.update failed during shutdown",
-                { game_id = game_id, err = tostring(exec_err) })
-        end
-    else
-        logger:error("[orchestrator] sql.get failed during shutdown",
-            { game_id = game_id, err = tostring(db_err) })
-    end
-
-    pe.publish_event("system", "game.ended", "/" .. game_id, {
-        winner = winner,
-        final_round = round,
-        living_mafia = living_mafia,
-        living_villagers = living_villagers,
-    })
-
-    -- Cascade cancel all NPC stubs (Pitfall 3).
-    for _, pid in pairs(npc_pids) do
-        process.cancel(pid, "500ms")
-    end
-    logger:info("[orchestrator] shutdown cascade complete", {
-        winner = winner, final_round = round,
-        living_mafia = living_mafia, living_villagers = living_villagers,
-    })
-end
-
--- Phase 4 / D-SCH-02 (closes WR-06): record every phase visit in the rounds table.
--- Schema (0001_initial_schema.lua:35-41): (game_id, round, phase, started_at)
--- with PRIMARY KEY (game_id, round) — only the FIRST phase visit per round is
--- written; subsequent visits are no-ops via INSERT OR IGNORE. WR-06's success
--- criterion ("rounds table is written at least once per round") is met either way.
--- UPSERT: creates row if missing (preserves started_at), always updates phase column.
--- Fire-and-forget — no error return (callers do not inspect result).
-local function record_round_phase(game_id, round, phase)
-    local db, db_err = sql.get("app:db")
-    if db_err or not db then
-        logger:warn("[orchestrator] record_round_phase: sql.get failed",
-            { err = tostring(db_err) })
-        return
-    end
-    -- Create row if missing; preserve started_at from first write.
-    db:execute(
-        "INSERT OR IGNORE INTO rounds (game_id, round, phase, started_at) VALUES (?, ?, ?, ?)",
-        { game_id, round, phase, time.now():unix() }
-    )
-    -- Always update phase so day/vote/reveal transitions are reflected.
-    db:execute(
-        "UPDATE rounds SET phase = ? WHERE game_id = ? AND round = ?",
-        { phase, game_id, round }
-    )
-    db:release()
-end
+-- Vote phase functions (alive_slots_array, gather_votes, persist_votes, tally_votes,
+-- persist_lynch, run_vote_round, run_vote_round_llm) extracted to src/game/vote.lua (cut 7).
+-- End-game functions (check_win, shutdown_cascade, record_round_phase) extracted to
+-- src/game/end_game.lua (cut 7).
 
 local function run(args)
     args = args or {}
@@ -911,26 +413,8 @@ local function run(args)
         partner_slot = partner_slot,  -- nil unless mafia (ROLE-03/ROLE-04)
     })
 
-    -- Intro gate: emit phase="intro" with full roster and block until the
-    -- player explicitly starts the game. No night kill, no LLM calls, no
-    -- chat until the gate exits via player.start_game.
-    state.phase = "intro"
-    emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
-        state.roster_names, player_slot, "intro", 0, false)
-    append_dev_event(state, "system", "game_state_changed", "/" .. game_id)
-
-    logger:info("[orchestrator] intro gate: waiting for player.start_game",
-        { game_id = game_id })
-    while true do
-        local r = channel.select({ inbox:case_receive() })
-        if not r.ok then
-            logger:warn("[orchestrator] inbox closed during intro gate")
-            break
-        end
-        local msg = r.value
-        if msg and msg:topic() == "player.start_game" then break end
-        -- Drop every other topic (stale chat/vote, unknown commands).
-    end
+    -- Intro gate: emit phase="intro" + block on player.start_game (cut 7 → intro.lua).
+    intro.run_intro(state, player_slot, inbox)
 
     -- 8. Post-INIT FSM loop (Plan 04).
     --    Night -> check_win -> Day -> Vote -> check_win -> loop | shutdown.
@@ -942,7 +426,7 @@ local function run(args)
 
         -- D-SCH-02 / WR-06: record phase visit. PK is (game_id, round); only the
         -- first phase per round actually writes — that's still enough to close WR-06.
-        record_round_phase(game_id, state.round, "night")
+        end_game.record_round_phase(game_id, state.round, "night")
 
         state.phase = "night"
         emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
@@ -1014,11 +498,11 @@ local function run(args)
         end
 
         -- LOOP-10: win check after the night elimination.
-        winner, living_mafia, living_villagers = check_win(state.alive, state.roles)
+        winner, living_mafia, living_villagers = end_game.check_win(state.alive, state.roles)
         if winner then break end
 
         -- D-SCH-02: record day phase visit (no-op due to PK if night already wrote).
-        record_round_phase(game_id, state.round, "day")
+        end_game.record_round_phase(game_id, state.round, "day")
 
         -- Emit game_state_changed WITH last_eliminated so the SPA can name the
         -- victim ("ALICE WAS ELIMINATED"). Without this, the store falls back
@@ -1060,7 +544,7 @@ local function run(args)
         end
 
         -- D-SCH-02: record vote phase visit (no-op due to PK if earlier phase wrote).
-        record_round_phase(game_id, state.round, "vote")
+        end_game.record_round_phase(game_id, state.round, "vote")
 
         state.phase = "vote"
         emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
@@ -1070,13 +554,13 @@ local function run(args)
 
         local ok_vote, vote_err
         if npc_mode() == "real" then
-            ok_vote, vote_err = run_vote_round_llm(
+            ok_vote, vote_err = vote.run_vote_round_llm(
                 game_id, state.round, state.alive, state.roles,
                 state.player_slot, state.npc_pids, state.force_tie, inbox,
                 state.chat_seq, state.roster_names, state.slot_persona,
                 state)
         else
-            ok_vote, vote_err = run_vote_round(
+            ok_vote, vote_err = vote.run_vote_round(
                 game_id, state.round, state.alive, state.roles,
                 state.player_slot, state.npc_pids, state.force_tie, inbox)
         end
@@ -1088,7 +572,7 @@ local function run(args)
 
         -- LOOP-10: win check after the lynch. On tie, state.alive is unchanged so
         -- check_win returns nil again and the loop advances to the next Night.
-        winner, living_mafia, living_villagers = check_win(state.alive, state.roles)
+        winner, living_mafia, living_villagers = end_game.check_win(state.alive, state.roles)
 
         -- If the game continues, DO NOT auto-advance to the next Night. Publish
         -- `day.vote_complete` so the SPA can enable its "Start next day" button,
@@ -1143,7 +627,7 @@ local function run(args)
             state.roster_names, player_slot, "ended", state.round, false, winner)
         append_dev_event(state, "system", "game_state_changed", "/" .. game_id)
         emit_dev_snapshot(state)
-        shutdown_cascade(game_id, state.round, winner,
+        end_game.shutdown_cascade(game_id, state.round, winner,
             living_mafia, living_villagers, state.npc_pids)
         return { status = "ended", winner = winner, final_round = state.round }
     end
