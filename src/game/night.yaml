@@ -15,5 +15,3 @@ entries:
       pe: app.lib:events
       det_rng: app.lib:det_rng
       chat: app.game:chat
-      game_state: app.game:game_state
-      dev_telemetry: app.game:dev_telemetry

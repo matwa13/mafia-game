@@ -14,8 +14,6 @@ local json      = require("json")
 local pe        = require("pe")
 local det_rng   = require("det_rng")
 local chat      = require("chat")
-local game_state = require("game_state")
-local dev_telemetry = require("dev_telemetry")
 
 -- Phase 2 Plan 03: Night phase stub.
 --
