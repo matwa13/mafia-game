@@ -25,7 +25,7 @@ end
 
 local function build_chat_prompt(state, is_mandatory)
     local p = prompt.new()
-    p:add_system(state.stable_block)
+    p:add_system(tostring(state.stable_block))
     p:add_cache_marker()
     local tail = visible_context(state.npc_id, {
         role = state.role,
@@ -52,7 +52,7 @@ end
 
 local function build_vote_prompt(state)
     local p = prompt.new()
-    p:add_system(state.stable_block)
+    p:add_system(tostring(state.stable_block))
     p:add_cache_marker()
     local vote_mode = "vote"
     local tail = visible_context(state.npc_id, {

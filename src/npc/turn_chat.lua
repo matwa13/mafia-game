@@ -22,6 +22,7 @@ local function run_chat_turn(state, round, is_mandatory)
     prompts.assert_stable_hash(state)
     state.round = round
 
+    local parent_pid = tostring(state.parent_pid)
     local p = prompts.build_chat_prompt(state, is_mandatory)
 
     -- Blocking generate in a coroutine so the main select loop can still
@@ -50,7 +51,7 @@ local function run_chat_turn(state, round, is_mandatory)
         if not r.ok or r.channel == deadline then
             state.last_llm_error = { type = "TIMEOUT", context = "chat", round = round }
             errors.persist_error(state.npc_id, "chat", { type = "TIMEOUT", message = CHAT_CAP_S }, 0)
-            process.send(state.parent_pid, "chat.decline", {
+            process.send(parent_pid, "chat.decline", {
                 from_slot = state.slot, round = round, reason = "timeout",
             })
             return
@@ -68,7 +69,7 @@ local function run_chat_turn(state, round, is_mandatory)
                 local cls = errors.classify(rv_err)
                 state.last_llm_error = { type = cls.reason or "error", context = "chat", round = round }
                 errors.persist_error(state.npc_id, "chat", rv_err, 0)
-                process.send(state.parent_pid, "chat.decline", {
+                process.send(parent_pid, "chat.decline", {
                     from_slot = state.slot, round = round,
                     reason = "llm_" .. (cls.reason or "error"),
                 })
@@ -82,7 +83,7 @@ local function run_chat_turn(state, round, is_mandatory)
             -- case the model echoes the word from cached context. Both
             -- turns are mandatory; DECLINE is never instructed.
             full = full:gsub("[%s%p]*[Dd][Ee][Cc][Ll][Ii][Nn][Ee][Dd]?[%s%p]*$", "")
-            process.send(state.parent_pid, "chat.submit", {
+            process.send(parent_pid, "chat.submit", {
                 from_slot = state.slot, round = round,
                 text = full, kind = "npc",
             })
@@ -105,7 +106,7 @@ local function run_chat_turn(state, round, is_mandatory)
             if type(msg) == "table" and msg.topic then
                 local tp = msg:topic()
                 if tp == "abort.turn" then
-                    process.send(state.parent_pid, "chat.decline", {
+                    process.send(parent_pid, "chat.decline", {
                         from_slot = state.slot, round = round, reason = "aborted_by_orchestrator",
                     })
                     return

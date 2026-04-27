@@ -49,6 +49,7 @@ local VOTE_SCHEMA = {
 local function run_vote_turn(state, round)
     prompts.assert_stable_hash(state)
     state.round = round
+    local parent_pid = tostring(state.parent_pid)
     local p = prompts.build_vote_prompt(state)
 
     local result_ch = channel.new(1)
@@ -62,7 +63,7 @@ local function run_vote_turn(state, round)
     if not r.ok or r.channel ~= result_ch then
         state.last_llm_error = { type = "TIMEOUT", context = "vote", round = round }
         errors.persist_error(state.npc_id, "vote", { type = "TIMEOUT", message = "15s cap" }, 0)
-        process.send(state.parent_pid, "vote.cast", {
+        process.send(parent_pid, "vote.cast", {
             from_slot = state.slot, vote_for_slot = nil,
             reasoning = "llm_timeout", round = round,
         })
@@ -79,7 +80,7 @@ local function run_vote_turn(state, round)
     if rv_err then
         state.last_llm_error = { type = "llm_error", context = "vote", round = round }
         errors.persist_error(state.npc_id, "vote", rv_err, 0)
-        process.send(state.parent_pid, "vote.cast", {
+        process.send(parent_pid, "vote.cast", {
             from_slot = state.slot, vote_for_slot = nil,
             reasoning = "llm_error", round = round,
         })
@@ -139,7 +140,7 @@ local function run_vote_turn(state, round)
         justification = res_reasoning,
     }
 
-    process.send(state.parent_pid, "vote.cast", {
+    process.send(parent_pid, "vote.cast", {
         from_slot = state.slot,
         vote_for_slot = vote_for_slot,
         reasoning = res_reasoning,

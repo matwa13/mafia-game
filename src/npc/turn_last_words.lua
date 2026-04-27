@@ -22,7 +22,7 @@ local LAST_WORDS_CAP_S = "10s"
 local function run_last_words(state, round)
     prompts.assert_stable_hash(state)
     local p = prompt.new()
-    p:add_system(state.stable_block)
+    p:add_system(tostring(state.stable_block))
     p:add_cache_marker()
     local tail = visible_context(state.npc_id, {
         role = state.role,

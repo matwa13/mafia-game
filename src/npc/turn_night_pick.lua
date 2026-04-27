@@ -49,6 +49,7 @@ local function run_night_pick(state, raw)
     prompts.assert_stable_hash(state)
     state.round = (raw.round and tonumber(raw.round)) or state.round or 0
     local round = state.round
+    local parent_pid = tostring(state.parent_pid)
 
     -- Extract living_target_slots + living_target_names from raw payload.
     local living_target_slots = {}
@@ -65,7 +66,7 @@ local function run_night_pick(state, raw)
     -- Build prompt: persona stable_block + cache marker + dynamic tail
     -- (event log + roster) + inline night-pick directive (mirrors run_last_words).
     local p = prompt.new()
-    p:add_system(state.stable_block)
+    p:add_system(tostring(state.stable_block))
     p:add_cache_marker()
     local visible_context = require("visible_context")
     local tail = visible_context(state.npc_id, {
@@ -101,7 +102,7 @@ local function run_night_pick(state, raw)
     if not r.ok or r.channel ~= result_ch then
         state.last_llm_error = { type = "TIMEOUT", context = "night_pick", round = round }
         errors.persist_error(state.npc_id, "night_pick", { type = "TIMEOUT", message = tostring(VOTE_CAP_S) }, 0)
-        process.send(state.parent_pid, "night.pick.response", {
+        process.send(parent_pid, "night.pick.response", {
             from_slot = state.slot,
             target_slot = fallback_slot,
             reasoning = "llm_timeout",
@@ -121,7 +122,7 @@ local function run_night_pick(state, raw)
     if rv_err then
         state.last_llm_error = { type = "llm_error", context = "night_pick", round = round }
         errors.persist_error(state.npc_id, "night_pick", rv_err, 0)
-        process.send(state.parent_pid, "night.pick.response", {
+        process.send(parent_pid, "night.pick.response", {
             from_slot = state.slot,
             target_slot = fallback_slot,
             reasoning = "llm_error",
@@ -171,7 +172,7 @@ local function run_night_pick(state, raw)
         confidence = confidence,
     }
 
-    process.send(state.parent_pid, "night.pick.response", {
+    process.send(parent_pid, "night.pick.response", {
         from_slot = state.slot,
         target_slot = target_slot,
         reasoning = reasoning,

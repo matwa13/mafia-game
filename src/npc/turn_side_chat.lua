@@ -49,6 +49,7 @@ local function run_night_side_chat(state, raw)
     prompts.assert_stable_hash(state)
     state.round = (raw.round and tonumber(raw.round)) or state.round or 0
     local round = state.round
+    local parent_pid = tostring(state.parent_pid)
 
     -- Pull living_target_slots/names + side_chat_history (recent partner exchange).
     local living_target_slots = {}
@@ -65,7 +66,7 @@ local function run_night_side_chat(state, raw)
     end
 
     local p = prompt.new()
-    p:add_system(state.stable_block)
+    p:add_system(tostring(state.stable_block))
     p:add_cache_marker()
 
     local visible_context = require("visible_context")
@@ -112,7 +113,7 @@ local function run_night_side_chat(state, raw)
 
     if not r.ok or r.channel ~= result_ch then
         errors.persist_error(state.npc_id, "side_chat", { type = "TIMEOUT", message = tostring(VOTE_CAP_S) }, 0)
-        process.send(state.parent_pid, "night.side_chat.reply", {
+        process.send(parent_pid, "night.side_chat.reply", {
             from_slot = state.slot,
             side_chat_text = "[side-chat unavailable]",
             suggested_target_slot = fallback_slot,
@@ -130,7 +131,7 @@ local function run_night_side_chat(state, raw)
     end
     if rv_err then
         errors.persist_error(state.npc_id, "side_chat", rv_err, 0)
-        process.send(state.parent_pid, "night.side_chat.reply", {
+        process.send(parent_pid, "night.side_chat.reply", {
             from_slot = state.slot,
             side_chat_text = "[side-chat unavailable]",
             suggested_target_slot = fallback_slot,
@@ -165,7 +166,7 @@ local function run_night_side_chat(state, raw)
     end
     if not valid then suggested_target_slot = fallback_slot end
 
-    process.send(state.parent_pid, "night.side_chat.reply", {
+    process.send(parent_pid, "night.side_chat.reply", {
         from_slot = state.slot,
         side_chat_text = side_chat_text,
         suggested_target_slot = suggested_target_slot,
