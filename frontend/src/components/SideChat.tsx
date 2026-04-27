@@ -1,5 +1,6 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useStore } from "../store";
+import { useStickyScroll } from "../hooks/useStickyScroll";
 import { MafiaChatBubble } from "./MafiaChatBubble";
 
 interface SideChatProps {
@@ -28,12 +29,8 @@ export function SideChat({ partnerThinking }: SideChatProps) {
   );
   const playerDead = playerEntry ? !playerEntry.alive : false;
 
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const { scrollContainerRef, sentinelRef } = useStickyScroll([messages, partnerThinking]);
   const [draft, setDraft] = useState("");
-
-  useLayoutEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
-  }, [messages, partnerThinking]);
 
   const inputDisabled = playerDead || partnerThinking;
 
@@ -54,6 +51,7 @@ export function SideChat({ partnerThinking }: SideChatProps) {
   return (
     <div className="flex flex-col h-full">
       <div
+        ref={scrollContainerRef}
         role="log"
         aria-live="polite"
         aria-atomic="false"
@@ -76,7 +74,7 @@ export function SideChat({ partnerThinking }: SideChatProps) {
             Partner is thinking...
           </div>
         )}
-        <div ref={bottomRef} aria-hidden="true" />
+        <div ref={sentinelRef} aria-hidden="true" />
       </div>
       <div
         className="flex gap-2 p-2 border-t"
