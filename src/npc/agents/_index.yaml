@@ -1,0 +1,118 @@
+version: "1.0"
+namespace: app.npc.agents
+
+# Phase 7 D-06 (Approach A — schema-as-tool, locked in 07-VERIFY.md Q4).
+# Each turn handler that previously called llm.structured_output(SCHEMA, ...)
+# now calls runner:step(conv, { tool_call = "any" }) and reads structured
+# results from response.tool_calls[1].arguments. The agent framework forces
+# the LLM to call ONE of the registered tools when tool_call = "any", and
+# meta.input_schema validates the args before the handler runs.
+#
+# All three tools share noop_tool.lua — the handler returns {} immediately.
+# The structured result is consumed in the turn handler, not here.
+
+entries:
+  # vote_tool — schema mirrors VOTE_SCHEMA in src/npc/turn_vote.lua (lines 22-47).
+  - name: vote_tool
+    kind: function.lua
+    source: file://noop_tool.lua
+    method: handler
+    meta:
+      type: tool
+      title: CastVote
+      llm_alias: cast_vote
+      llm_description: "Update private suspicion of each named player and cast your vote."
+      input_schema: |
+        {
+          "type": "object",
+          "properties": {
+            "suspicion_updates": {
+              "type": "object",
+              "description": "Delta changes to private suspicion of each named player, in [-20, 20].",
+              "additionalProperties": { "type": "integer", "minimum": -20, "maximum": 20 }
+            },
+            "reflection_notes": {
+              "type": "object",
+              "description": "Short per-player notes (<=60 chars) grounding this round's suspicion.",
+              "additionalProperties": { "type": "string", "maxLength": 60 }
+            },
+            "vote_target": {
+              "type": "string",
+              "description": "Name of a living non-self player you vote to eliminate. Must be one of the players in the ROSTER. Abstention is not allowed."
+            },
+            "reasoning": {
+              "type": "string",
+              "maxLength": 400,
+              "description": "One-sentence reason referencing specific discussion content, addressing players by name."
+            }
+          },
+          "required": ["suspicion_updates", "reflection_notes", "vote_target", "reasoning"],
+          "additionalProperties": false
+        }
+
+  # night_pick_tool — schema mirrors NIGHT_PICK_SCHEMA in src/npc/turn_night_pick.lua (lines 25-46).
+  - name: night_pick_tool
+    kind: function.lua
+    source: file://noop_tool.lua
+    method: handler
+    meta:
+      type: tool
+      title: PickNightTarget
+      llm_alias: pick_night_target
+      llm_description: "Pick a target slot to eliminate at night. Mafia-only."
+      input_schema: |
+        {
+          "type": "object",
+          "properties": {
+            "target_slot": {
+              "type": "integer",
+              "description": "Slot number of a living non-Mafia player to eliminate. Must be in the living_target_slots list."
+            },
+            "reasoning": {
+              "type": "string",
+              "maxLength": 300,
+              "description": "One sentence explaining why this target."
+            },
+            "confidence": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "How confident you are in this pick, 0-100."
+            }
+          },
+          "required": ["target_slot", "reasoning", "confidence"],
+          "additionalProperties": false
+        }
+
+  # side_chat_tool — schema mirrors SIDE_CHAT_SCHEMA in src/npc/turn_side_chat.lua (lines 26-46).
+  - name: side_chat_tool
+    kind: function.lua
+    source: file://noop_tool.lua
+    method: handler
+    meta:
+      type: tool
+      title: ReplyMafiaSideChat
+      llm_alias: reply_mafia_side_chat
+      llm_description: "Reply to your Mafia partner with a short message and your current target suggestion."
+      input_schema: |
+        {
+          "type": "object",
+          "properties": {
+            "side_chat_text": {
+              "type": "string",
+              "maxLength": 200,
+              "description": "What you say to your partner (1-2 sentences max). In character."
+            },
+            "suggested_target_slot": {
+              "type": "integer",
+              "description": "Slot of living non-Mafia player you currently suggest targeting."
+            },
+            "reasoning": {
+              "type": "string",
+              "maxLength": 200,
+              "description": "Internal reasoning (not shown to partner). Why this target?"
+            }
+          },
+          "required": ["side_chat_text", "suggested_target_slot", "reasoning"],
+          "additionalProperties": false
+        }
