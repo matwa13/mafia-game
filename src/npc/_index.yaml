@@ -93,6 +93,7 @@ entries:
       event_log: app.npc:event_log
 
   # D-05 (Phase 6): Vote turn handler — run_vote_turn.
+  # Phase 7: agent runner via state.runner; schema-as-tool dispatch via app.npc.agents:vote_tool.
   - name: turn_vote
     kind: library.lua
     source: file://turn_vote.lua
@@ -102,7 +103,6 @@ entries:
       - sql
       - json
     imports:
-      llm: wippy.llm:llm
       pe: app.lib:events
       prompts: app.npc:prompts
       errors: app.npc:errors
@@ -110,6 +110,7 @@ entries:
       event_log: app.npc:event_log
 
   # D-05 (Phase 6): Night-pick turn handler — run_night_pick (LOOP-02 Mafia-picks).
+  # Phase 7: agent runner via state.runner; schema-as-tool via app.npc.agents:night_pick_tool.
   - name: turn_night_pick
     kind: library.lua
     source: file://turn_night_pick.lua
@@ -119,7 +120,6 @@ entries:
       - sql
       - json
     imports:
-      llm: wippy.llm:llm
       pe: app.lib:events
       prompt: wippy.llm:prompt
       prompts: app.npc:prompts
@@ -128,6 +128,7 @@ entries:
       event_log: app.npc:event_log
 
   # D-05 (Phase 6): Mafia night side-chat turn handler — run_night_side_chat (LOOP-03).
+  # Phase 7: agent runner via state.runner; schema-as-tool via app.npc.agents:side_chat_tool.
   - name: turn_side_chat
     kind: library.lua
     source: file://turn_side_chat.lua
@@ -137,7 +138,6 @@ entries:
       - sql
       - json
     imports:
-      llm: wippy.llm:llm
       pe: app.lib:events
       prompt: wippy.llm:prompt
       prompts: app.npc:prompts
