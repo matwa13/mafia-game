@@ -10,6 +10,7 @@ entries:
     modules:
       - http
       - json
+      - env
 
   # HTTP endpoint on the /ws router.
   # Matches GET / (which, relative to the router's /ws prefix, is the /ws
