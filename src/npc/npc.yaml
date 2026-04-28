@@ -14,6 +14,7 @@ entries:
       - hash
     imports:
       pe: app.lib:events
+      agent_context: wippy.agent:context   # Phase 7 D-04 inline ctx:load_agent for per-NPC runner
       persona: app.npc:persona
       prompts: app.npc:prompts
       turn_chat: app.npc:turn_chat

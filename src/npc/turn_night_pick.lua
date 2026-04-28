@@ -1,49 +1,26 @@
 -- src/npc/turn_night_pick.lua
 -- D-05 (Phase 6): Night-pick turn handler — run_night_pick.
+-- Phase 7: migrated from wippy/llm structured output to agent runner:step (Approach A schema-as-tool).
+-- Schema lives in src/npc/agents/_index.yaml (night_pick_tool entry).
 -- LOOP-02 (Mafia-picks branch): Mafia NPC's structured night-pick. Higher confidence
 -- wins on tie-break (orchestrator-side, Plan 04). target_slot constrained to
 -- living non-Mafia slot list passed in the night.pick request payload.
--- Persona drift tripwire (assert_stable_hash) fires first — same as run_vote_turn.
+-- Persona drift tripwire (assert_stable_hash) fires first.
 
 local logger    = require("logger"):named("turn_night_pick")
 local time      = require("time")
 local sql       = require("sql")
 local json      = require("json")
-local llm       = require("llm")
 local pe        = require("pe")
 local prompt    = require("prompt")
 local prompts   = require("prompts")
 local errors    = require("errors")
 local event_log = require("event_log")
 
-local MODEL      = "claude-haiku-4-5"
+-- Phase 7: MODEL constant removed - model is set in agent definition (npc.lua ctx:load_agent).
 local VOTE_CAP_S = "15s"
 
--- LOOP-02 (Villager-auto): Mafia NPC's structured night-pick. Higher confidence
--- wins on tie-break (orchestrator-side, Plan 04). target_slot is constrained to
--- the living non-Mafia slot list passed in the night.pick request payload.
-local NIGHT_PICK_SCHEMA = {
-    type = "object",
-    properties = {
-        target_slot = {
-            type = "integer",
-            description = "Slot number of a living non-Mafia player to eliminate. Must be in the living_target_slots list.",
-        },
-        reasoning = {
-            type = "string",
-            maxLength = 300,
-            description = "One sentence explaining why this target.",
-        },
-        confidence = {
-            type = "integer",
-            minimum = 0,
-            maximum = 100,
-            description = "How confident you are in this pick, 0-100.",
-        },
-    },
-    required = { "target_slot", "reasoning", "confidence" },
-    additionalProperties = false,
-}
+-- Phase 7: NIGHT_PICK_SCHEMA moved to src/npc/agents/_index.yaml (night_pick_tool meta.input_schema).
 
 local function run_night_pick(state, raw)
     prompts.assert_stable_hash(state)
@@ -63,11 +40,8 @@ local function run_night_pick(state, raw)
         fallback_slot = tonumber(living_target_slots[1])
     end
 
-    -- Build prompt: persona stable_block + cache marker + dynamic tail
-    -- (event log + roster) + inline night-pick directive (mirrors run_last_words).
+    -- Phase 7: user-message-only conversation. Agent runner injects system prompt.
     local p = prompt.new()
-    p:add_system(tostring(state.stable_block))
-    p:add_cache_marker()
     local visible_context = require("visible_context")
     local tail = visible_context(state.npc_id, {
         role = state.role,
@@ -91,9 +65,15 @@ local function run_night_pick(state, raw)
         round, names_str, slots_str)
     p:add_user(tail .. directive)
 
+    assert(state.tool_runner ~= nil, "tool_runner missing — npc.lua init order broken")
     local result_ch = channel.new(1)
     coroutine.spawn(function()
-        local res, err = llm.structured_output(NIGHT_PICK_SCHEMA, p, { model = MODEL })
+        -- Phase 7 D-12-FALLBACK + Approach A: named tool_call forces
+        -- pick_night_target (llm_alias of night_pick_tool). Uses tool_runner
+        -- (per-NPC second runner with the three schema-as-tool entries).
+        local res, err = errors.with_retry(state.npc_id, "night_pick", function()
+            return state.tool_runner:step(p, { tool_call = "pick_night_target" })
+        end)
         result_ch:send({ res = res, err = err })
     end)
     local deadline = time.after(VOTE_CAP_S)
@@ -132,24 +112,17 @@ local function run_night_pick(state, raw)
         return
     end
 
-    -- framework/llm wraps structured_output as { result = <schema_table>, ... }
+    -- Phase 7: structured args at response.tool_calls[1].arguments (Lua table).
     local res_table = {}
-    if type(rv_res) == "table" then
-        local inner = nil
-        for k, v in pairs(rv_res) do
-            if k == "result" and type(v) == "table" then inner = v end
-        end
-        res_table = inner or rv_res
+    if type(rv_res) == "table" and type(rv_res.tool_calls) == "table"
+       and type(rv_res.tool_calls[1]) == "table"
+       and type(rv_res.tool_calls[1].arguments) == "table" then
+        res_table = rv_res.tool_calls[1].arguments
     end
 
-    local target_slot = nil
-    local reasoning = ""
-    local confidence = 0
-    for k, v in pairs(res_table) do
-        if k == "target_slot" then target_slot = tonumber(v) end
-        if k == "reasoning" then reasoning = tostring(v) end
-        if k == "confidence" then confidence = tonumber(v) or 0 end
-    end
+    local target_slot = res_table.target_slot and tonumber(res_table.target_slot) or nil
+    local reasoning   = tostring(res_table.reasoning or "")
+    local confidence  = tonumber(res_table.confidence) or 0
 
     -- Defensive: if LLM returned an out-of-list slot, fall back to the first
     -- living non-Mafia. Same approach as run_vote_turn name-to-slot resolution.

@@ -1,12 +1,11 @@
 -- src/npc/prompts.lua
 -- D-04 (Phase 6): Sole home for build_chat_prompt + build_vote_prompt + assert_stable_hash.
 -- Pattern H non-negotiable: the persona block (state.stable_block) is byte-identical across
--- all turns — this file does NOT modify the block, only wraps it with prompt:add_system +
--- prompt:add_cache_marker in the exact order established in Phase 1 (D-15/D-13 SHA256 anchor).
--- cache_control = ephemeral marker: prompt:add_cache_marker() is called once per prompt,
--- immediately after add_system(stable_block) — see 06-RESEARCH §G for the ephemeral-marker
--- contract (changing the call order breaks the cache hit).
--- Function bodies are verbatim-moved from src/npc/npc.lua — NO reordering, NO wrapping.
+-- all turns. Phase 7 D-05: persona block is now compiled into the agent definition's
+-- `prompt` field (set in src/npc/npc.lua at ctx:load_agent time). The conversation passed
+-- to runner:step contains ONLY the dynamic user message — no add_system, no add_cache_marker.
+-- assert_stable_hash continues to anchor on the persona.render_stable_block output
+-- (state.persona_args) byte-for-byte (Phase 1 D-15 tripwire preserved verbatim).
 
 local prompt          = require("prompt")
 local hash            = require("hash")
@@ -24,9 +23,10 @@ local function assert_stable_hash(state)
 end
 
 local function build_chat_prompt(state, is_mandatory)
+    -- Phase 7: user-message-only conversation. The agent runner injects the
+    -- system prompt automatically from the agent definition (state.runner's
+    -- compiled prompt field, set at ctx:load_agent time in src/npc/npc.lua).
     local p = prompt.new()
-    p:add_system(tostring(state.stable_block))
-    p:add_cache_marker()
     local tail = visible_context(state.npc_id, {
         role = state.role,
         event_log = state.event_log or {},
@@ -40,20 +40,26 @@ local function build_chat_prompt(state, is_mandatory)
     -- follow-up, not an optional skip. This eliminates the DECLINE token
     -- entirely — the LLM has no reason to emit it because it's not in the
     -- prompt anymore.
+    --
+    -- Phase 7 brevity tightening: pre-Phase-7 the `llm.generate` direct call
+    -- reliably produced 1-2 sentence outputs. Under the agent runner the LLM
+    -- treats the inline directive less strictly, so the cap is restated as
+    -- a HARD LIMIT and given a "STOP at" rule to lean on Claude's
+    -- instruction-following without changing max_tokens (which would also
+    -- truncate the structured tool_calls used by vote/night_pick/side_chat).
     local directive
     if is_mandatory then
-        directive = "\n\n===SPEAK NOW — OPENING===\nIt's your turn to open. In 1-2 short sentences (max ~40 words), share your read on the day so far. Address other players by name when you accuse, defend, or question. Do NOT write paragraphs."
+        directive = "\n\n===SPEAK NOW — OPENING===\nHARD LIMIT: 2 sentences max, 40 words max. STOP at the second period even mid-thought. Do NOT explain your reasoning. Do NOT apologize or hedge. Do NOT add disclaimers. Share your read on the day so far. Address other players by name when you accuse, defend, or question."
     else
-        directive = "\n\n===SPEAK NOW — FOLLOW-UP===\nAdd ONE short follow-up sentence (max ~25 words) that reacts to what was just said. Sharpen an accusation, defend yourself, or call out someone's silence. Always say something concrete — no filler."
+        directive = "\n\n===SPEAK NOW — FOLLOW-UP===\nHARD LIMIT: 1 sentence, 25 words max. STOP at the period. React to what was just said — sharpen an accusation, defend yourself, or call out someone's silence. Say one concrete thing. Do NOT explain or hedge."
     end
     p:add_user(tail .. directive)
     return p
 end
 
 local function build_vote_prompt(state)
+    -- Phase 7: user-message-only conversation. Agent runner injects system prompt.
     local p = prompt.new()
-    p:add_system(tostring(state.stable_block))
-    p:add_cache_marker()
     local vote_mode = "vote"
     local tail = visible_context(state.npc_id, {
         role = state.role,

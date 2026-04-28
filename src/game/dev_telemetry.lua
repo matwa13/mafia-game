@@ -84,7 +84,7 @@ local function request_dev_snapshots(state)
     -- Fill identity fields from orchestrator-owned state for any slot that
     -- didn't reply within the deadline. Two real causes of no-reply:
     --   1. Voted-out NPCs whose process has exited (no one to answer).
-    --   2. Alive NPCs busy in a multi-second llm.generate call (their main
+    --   2. Alive NPCs busy in a multi-second agent runner call (their main
     --      loop won't read dev.snapshot.request until the call returns).
     -- Without this fill the SPA card shows "—" for name/role/alive even
     -- though the orchestrator already knows those values. Live telemetry

@@ -1,29 +1,27 @@
 -- src/npc/turn_last_words.lua
 -- D-05 (Phase 6): Last-words turn handler — run_last_words.
+-- Phase 7: migrated from llm direct calls to the wippy/agent runner:step call.
 -- "Exactly one in-persona last words on elimination" — Phase 3 success criterion NPC-09.
--- Non-streaming: coroutine-spawned llm.generate raced against a 10s deadline.
--- errors.extract_generate_text (shared with turn_chat) unwraps the LLM result shape.
+-- Non-streaming: coroutine-spawned runner:step raced against a 10s deadline.
 
 local logger          = require("logger"):named("turn_last_words")
 local time            = require("time")
 local sql             = require("sql")
 local json            = require("json")
-local llm             = require("llm")
 local pe              = require("pe")
-local prompt          = require("prompt")
+local prompt = require("prompt")
 local prompts         = require("prompts")
 local errors          = require("errors")
 local visible_context = require("visible_context")
 local event_log       = require("event_log")
 
-local MODEL            = "claude-haiku-4-5"
+-- Phase 7: MODEL constant removed - model is set in agent definition (npc.lua ctx:load_agent).
 local LAST_WORDS_CAP_S = "10s"
 
 local function run_last_words(state, round)
     prompts.assert_stable_hash(state)
+    -- Phase 7: user-message-only conversation. Agent runner injects system prompt.
     local p = prompt.new()
-    p:add_system(tostring(state.stable_block))
-    p:add_cache_marker()
     local tail = visible_context(state.npc_id, {
         role = state.role,
         event_log = state.event_log or {},
@@ -39,10 +37,17 @@ local function run_last_words(state, round)
     end
     p:add_user(tail .. directive)
 
-    -- Non-streaming — race a coroutine-spawned generate against a 10s cap.
+    -- Non-streaming — race a coroutine-spawned runner:step against a 10s cap.
+    -- Phase 7 architectural contract pin: state.runner is set in npc.lua process
+    -- init and inherited via the state table. If this assert fires, npc.lua init
+    -- order is broken or library.lua state inheritance changed — fix at the source.
+    assert(state.runner ~= nil, "runner missing — npc.lua init order broken")
     local result_ch = channel.new(1)
     coroutine.spawn(function()
-        local res, err = llm.generate(p, { model = MODEL })
+        -- Phase 7 D-12-FALLBACK: retry wrapper around the runner call.
+        local res, err = errors.with_retry(state.npc_id, "last_words", function()
+            return state.runner:step(p, {})
+        end)
         result_ch:send({ res = res, err = err })
     end)
     local deadline = time.after(LAST_WORDS_CAP_S)
@@ -65,7 +70,7 @@ local function run_last_words(state, round)
     end
 
     -- First-run probe: log the raw result shape so field path is confirmed.
-    -- This log is cheap and stays on — if a future Wippy/framework-llm update
+    -- This log is cheap and stays on — if a future framework update
     -- changes the shape, this log catches it immediately.
     local keys = {}
     if type(rv_res) == "table" then
@@ -77,15 +82,18 @@ local function run_last_words(state, round)
         keys = keys,
     })
 
-    -- Extract text via errors.extract_generate_text (shared with turn_chat).
-    local text = errors.extract_generate_text(rv_res)
-    if type(text) ~= "string" then text = tostring(text) end
+    -- Phase 7: agent runner response.result is the generated string directly.
+    -- Hoisted out of an `and/or` chain so luals can narrow rv_res through the type guard.
+    local text = ""
+    if type(rv_res) == "table" and type(rv_res.result) == "string" then
+        text = rv_res.result
+    end
 
-    -- Non-empty guard: wrong field path silently returns "" which breaks NPC-09.
-    -- If this assert fires on first run, inspect the logged `keys` above and
-    -- pick the correct field.
+    -- Non-empty guard preserved: wrong runner contract or empty result silently
+    -- returns "" which would break NPC-09 (no last-words). The assert fires
+    -- on broken upstream so the regression is caught at first failure.
     assert(#text > 0, string.format(
-        "[npc] run_last_words extracted empty text — wrong field path? npc=%s res_keys=%s",
+        "[npc] run_last_words got empty response.result — npc=%s res_keys=%s",
         state.npc_id, table.concat(keys, ",")))
     return text
 end

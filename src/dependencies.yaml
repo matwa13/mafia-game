@@ -42,6 +42,12 @@ entries:
       - name: env_storage
         value: app:env
 
+  # Phase 7: dep.llm retained — needed by the legacy Phase 1 harness at
+  # src/npc/npc_test.yaml, which still imports `llm: wippy.llm:llm` and
+  # therefore requires wippy/llm's ns.requirements (process_host + env_storage)
+  # to be wired here for boot-time resolution. All 5 live game-path NPC turn
+  # handlers now route through wippy/agent (dep.agent below); only the legacy
+  # test harness keeps the wippy/llm import.
   # Binds the wippy/llm module's ns.requirements:
   #   - process_host → our process.host (Bedrock/Google credential refreshers spawn here)
   #   - env_storage → our writable env storage (reads ANTHROPIC_API_KEY etc.)
@@ -54,3 +60,10 @@ entries:
         value: app.processes:host
       - name: env_storage
         value: app:env
+
+  # Binds the wippy/agent module. No ns.requirements to wire — agent
+  # delegates LLM/env needs to wippy/llm (already wired via dep.llm above).
+  - name: dep.agent
+    kind: ns.dependency
+    component: wippy/agent
+    version: "*"

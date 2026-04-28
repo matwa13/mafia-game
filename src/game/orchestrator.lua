@@ -434,10 +434,17 @@ local function run(args)
 
         -- Phase 4 LOOP-02: branch on player role at night.
         -- Stub path (used by test_driver V-02-XX harness): keep run_night_stub.
-        -- Real-LLM path: villager → run_night_villager_auto, mafia → run_night_mafia_human.
+        -- Real-LLM path: villager-or-dead-player → run_night_villager_auto,
+        -- alive-mafia-player → run_night_mafia_human.
+        --
+        -- Phase 7 fix: dead human-mafia must fall through to villager_auto.
+        -- run_night_mafia_human blocks forever on `player.night_pick` (night.lua:401)
+        -- because a voted-out human cannot send that event. run_night_villager_auto
+        -- handles 1-N living mafia pickers cleanly, so a sole-surviving NPC mafia
+        -- partner picks a target unattended.
         local ok_night, night_result
         if npc_mode() == "real" then
-            if state.roles[player_slot] == "villager" then
+            if state.roles[player_slot] == "villager" or not state.alive[player_slot] then
                 ok_night, night_result = night.run_night_villager_auto(
                     game_id, state.round, state.alive, state.roles, state.npc_pids,
                     state.roster_names)

@@ -1,50 +1,26 @@
 -- src/npc/turn_vote.lua
 -- D-05 (Phase 6): Vote turn handler — run_vote_turn.
+-- Phase 7: migrated from wippy/llm structured output to agent runner:step (Approach A schema-as-tool).
+-- Schema lives in src/npc/agents/_index.yaml (vote_tool entry); runner forces tool_call.
 -- Two-stage informed voting non-negotiable: private suspicion update (apply_suspicion_updates)
--- then llm.structured_output returning {vote_target, reasoning, suspicion_updates}.
+-- then runner:step returns suspicion_updates + reflection_notes + vote_target + reasoning via tool args.
 -- Not random, not bandwagon-by-default. Suspicion persisted to SQL at round end (NPC-08).
 
 local logger    = require("logger"):named("turn_vote")
 local time      = require("time")
 local sql       = require("sql")
 local json      = require("json")
-local llm       = require("llm")
 local pe        = require("pe")
 local prompts   = require("prompts")
 local errors    = require("errors")
 local suspicion = require("suspicion")
 local event_log = require("event_log")
 
-local MODEL      = "claude-haiku-4-5"
+-- Phase 7: MODEL constant removed - model is set in agent definition (npc.lua ctx:load_agent).
 local VOTE_CAP_S = "15s"
 
--- VOTE_SCHEMA per CONTEXT.md D-04 — vote_target is a NAME string, not slot.
-local VOTE_SCHEMA = {
-    type = "object",
-    properties = {
-        suspicion_updates = {
-            type = "object",
-            description = "Delta changes to private suspicion of each named player, in [-20, 20].",
-            additionalProperties = { type = "integer", minimum = -20, maximum = 20 },
-        },
-        reflection_notes = {
-            type = "object",
-            description = "Short per-player notes (<=60 chars) grounding this round's suspicion.",
-            additionalProperties = { type = "string", maxLength = 60 },
-        },
-        vote_target = {
-            type = "string",
-            description = "Name of a living non-self player you vote to eliminate. Must be one of the players in the ROSTER. Abstention is not allowed.",
-        },
-        reasoning = {
-            type = "string",
-            maxLength = 400,
-            description = "One-sentence reason referencing specific discussion content, addressing players by name.",
-        },
-    },
-    required = { "suspicion_updates", "reflection_notes", "vote_target", "reasoning" },
-    additionalProperties = false,
-}
+-- Phase 7: VOTE_SCHEMA moved to src/npc/agents/_index.yaml (vote_tool meta.input_schema).
+-- The runner forces a tool_call; structured args arrive at response.tool_calls[1].arguments.
 
 local function run_vote_turn(state, round)
     prompts.assert_stable_hash(state)
@@ -52,9 +28,23 @@ local function run_vote_turn(state, round)
     local parent_pid = tostring(state.parent_pid)
     local p = prompts.build_vote_prompt(state)
 
+    -- Phase 7 architectural contract pin: state.runner is set in npc.lua process
+    -- init and inherited via the state table. If this assert fires, npc.lua init
+    -- order is broken or library.lua state inheritance changed — fix at the source,
+    -- do NOT add a defensive default here. Plan 04 confirmed this contract holds
+    -- for turn_chat / turn_last_words; turn_vote uses state.tool_runner
+    -- (the second per-NPC runner with schema-as-tool entries registered).
+    assert(state.tool_runner ~= nil, "tool_runner missing — npc.lua init order broken")
     local result_ch = channel.new(1)
     coroutine.spawn(function()
-        local res, err = llm.structured_output(VOTE_SCHEMA, p, { model = MODEL })
+        -- Phase 7 D-12-FALLBACK + Approach A: runner:step with named tool_call
+        -- forces the LLM to invoke cast_vote (the llm_alias of vote_tool —
+        -- registered in src/npc/agents/_index.yaml). Structured args are
+        -- validated against meta.input_schema and surfaced via
+        -- response.tool_calls[1].arguments.
+        local res, err = errors.with_retry(state.npc_id, "vote", function()
+            return state.tool_runner:step(p, { tool_call = "cast_vote" })
+        end)
         result_ch:send({ res = res, err = err })
     end)
     local deadline = time.after(VOTE_CAP_S)
@@ -87,31 +77,20 @@ local function run_vote_turn(state, round)
         return
     end
 
-    -- framework/llm wraps structured_output as { result = <schema_table>, ... }
+    -- Phase 7: agent runner with tool_call="any" surfaces structured args at
+    -- response.tool_calls[1].arguments (already a Lua table — schema-validated).
     local res = {}
-    if type(rv_res) == "table" then
-        local inner = nil
-        for k, v in pairs(rv_res) do
-            if k == "result" and type(v) == "table" then inner = v end
-        end
-        if inner then
-            res = inner
-        else
-            res = rv_res
-        end
+    if type(rv_res) == "table" and type(rv_res.tool_calls) == "table"
+       and type(rv_res.tool_calls[1]) == "table"
+       and type(rv_res.tool_calls[1].arguments) == "table" then
+        res = rv_res.tool_calls[1].arguments
     end
 
     -- Apply suspicion deltas + persist snapshot (NPC-08).
-    local res_suspicion_updates = nil
-    local res_reflection_notes = nil
-    local res_vote_target = nil
-    local res_reasoning = ""
-    for k, v in pairs(res) do
-        if k == "suspicion_updates" then res_suspicion_updates = v end
-        if k == "reflection_notes" then res_reflection_notes = v end
-        if k == "vote_target" then res_vote_target = v end
-        if k == "reasoning" then res_reasoning = tostring(v) end
-    end
+    local res_suspicion_updates = res.suspicion_updates
+    local res_reflection_notes  = res.reflection_notes
+    local res_vote_target       = res.vote_target
+    local res_reasoning         = tostring(res.reasoning or "")
 
     suspicion.apply_suspicion_updates(state, res_suspicion_updates, res_reflection_notes)
     local ok, perr = suspicion.persist_suspicion_snapshot(state.npc_id, state.game_id, round, state.suspicion)

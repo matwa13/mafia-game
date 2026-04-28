@@ -25,6 +25,7 @@ local turn_last_words = require("turn_last_words")
 local errors          = require("errors")
 local suspicion       = require("suspicion")
 local event_log       = require("event_log")
+local agent_context   = require("agent_context")
 
 -- Section L: main loop + boot -----------------------------------------------
 
@@ -307,6 +308,72 @@ local function run(args)
         last_pick         = nil,
         last_dynamic_tail = nil,
     }
+
+    -- 6b. Phase 7 D-04: Create per-NPC agent context + runner (inline spec).
+    -- Done ONCE per NPC process lifetime. The agent's `prompt` field is the
+    -- byte-identical persona stable_block; runner:step calls in turn handlers
+    -- inject only the dynamic user message via the conversation argument.
+    -- Persona drift tripwire (assert_stable_hash) still anchors on
+    -- render_stable_block(persona_args) — see prompts.lua, Plan 07-03.
+    -- Phase 7 fix (round 2 — chat-meta-leak): two runners per NPC.
+    -- Tool descriptions are sent in EVERY request when the agent has tools
+    -- registered (agent.lua:472-474), so a tool-equipped agent contaminates
+    -- text-only chat turns: the LLM meta-comments about tools, asks the
+    -- system whether it should call cast_vote, and in one observed case
+    -- LEAKED the mafia partner's name in a parenthetical self-evaluation.
+    -- `tool_choice = "none"` does not help — it only blocks the call, not
+    -- the description payload.
+    --
+    -- Architecture: chat_runner (no tools) for turn_chat + turn_last_words;
+    -- tool_runner (with three schema-as-tool entries) for turn_vote +
+    -- turn_night_pick + turn_side_chat. Both runners share the same persona
+    -- stable_block as their system prompt — `assert_stable_hash` keys off
+    -- state.persona_args (NOT off any runner field), so the SHA-256
+    -- tripwire is preserved byte-for-byte across both runners.
+    local chat_ctx = agent_context.new()
+    local chat_runner, chat_err = chat_ctx:load_agent({
+        id          = NPC_ID .. ":chat",
+        name        = NPC_ID,
+        prompt      = stable_block,
+        model       = "claude-haiku-4-5",
+        max_tokens  = 256,
+        temperature = 0,
+        -- Intentionally NO tools: turn_chat / turn_last_words call
+        -- runner:step(p, {}) and produce plain text replies.
+    })
+    if chat_err then
+        logger:error("[npc] chat_ctx:load_agent failed", {
+            npc = NPC_ID, err = tostring(chat_err),
+        })
+        return
+    end
+
+    local tool_ctx = agent_context.new()
+    local tool_runner, tool_err = tool_ctx:load_agent({
+        id          = NPC_ID .. ":tools",
+        name        = NPC_ID,
+        prompt      = stable_block,
+        model       = "claude-haiku-4-5",
+        max_tokens  = 512,
+        temperature = 0,
+        tools       = {
+            "app.npc.agents:vote_tool",
+            "app.npc.agents:night_pick_tool",
+            "app.npc.agents:side_chat_tool",
+        },
+    })
+    if tool_err then
+        logger:error("[npc] tool_ctx:load_agent failed", {
+            npc = NPC_ID, err = tostring(tool_err),
+        })
+        -- D-08 invariant: NPC errors are return values, never crashes.
+        return
+    end
+
+    state.chat_ctx    = chat_ctx
+    state.tool_ctx    = tool_ctx
+    state.runner      = chat_runner   -- bare runner:step(p, {}) clients (turn_chat, turn_last_words)
+    state.tool_runner = tool_runner   -- runner:step(p, { tool_call = "<name>" }) clients (turn_vote, turn_night_pick, turn_side_chat)
 
     -- 7. Main loop.
     main_loop(state, public_sub, mafia_sub, system_sub,
