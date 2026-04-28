@@ -1,5 +1,7 @@
 -- src/npc/turn_side_chat.lua
 -- D-05 (Phase 6): Mafia night side-chat turn handler — run_night_side_chat.
+-- Phase 7: migrated from wippy/llm structured output to agent runner:step (Approach A schema-as-tool).
+-- Schema lives in src/npc/agents/_index.yaml (side_chat_tool entry).
 -- LOOP-03 + the mafia scope routing non-negotiable: side-chat events carry scope="mafia";
 -- villager NPCs never subscribe to mafia.mafia so the private channel is enforced.
 -- Strict alternation enforced by orchestrator: exactly one night.side_chat per turn,
@@ -9,41 +11,16 @@ local logger    = require("logger"):named("turn_side_chat")
 local time      = require("time")
 local sql       = require("sql")
 local json      = require("json")
-local llm       = require("llm")
 local pe        = require("pe")
 local prompt    = require("prompt")
 local prompts   = require("prompts")
 local errors    = require("errors")
 local event_log = require("event_log")
 
-local MODEL      = "claude-haiku-4-5"
+-- Phase 7: MODEL constant removed - model is set in agent definition (npc.lua ctx:load_agent).
 local VOTE_CAP_S = "15s"
 
--- LOOP-03: Mafia partner side-chat turn — one structured_output call per turn.
--- Partner emits a short side-chat line PLUS a current target suggestion. The
--- suggestion may evolve across turns as the human pushes back; the SPA's
--- "Partner picks: X" badge updates each time.
-local SIDE_CHAT_SCHEMA = {
-    type = "object",
-    properties = {
-        side_chat_text = {
-            type = "string",
-            maxLength = 200,
-            description = "What you say to your partner (1-2 sentences max). In character.",
-        },
-        suggested_target_slot = {
-            type = "integer",
-            description = "Slot of living non-Mafia player you currently suggest targeting.",
-        },
-        reasoning = {
-            type = "string",
-            maxLength = 200,
-            description = "Internal reasoning (not shown to partner). Why this target?",
-        },
-    },
-    required = { "side_chat_text", "suggested_target_slot", "reasoning" },
-    additionalProperties = false,
-}
+-- Phase 7: SIDE_CHAT_SCHEMA moved to src/npc/agents/_index.yaml (side_chat_tool meta.input_schema).
 
 local function run_night_side_chat(state, raw)
     prompts.assert_stable_hash(state)
@@ -65,10 +42,8 @@ local function run_night_side_chat(state, raw)
         fallback_slot = tonumber(living_target_slots[1])
     end
 
+    -- Phase 7: user-message-only conversation. Agent runner injects system prompt.
     local p = prompt.new()
-    p:add_system(tostring(state.stable_block))
-    p:add_cache_marker()
-
     local visible_context = require("visible_context")
     local tail = visible_context(state.npc_id, {
         role = state.role,
@@ -105,7 +80,10 @@ local function run_night_side_chat(state, raw)
 
     local result_ch = channel.new(1)
     coroutine.spawn(function()
-        local res, err = llm.structured_output(SIDE_CHAT_SCHEMA, p, { model = MODEL })
+        -- Phase 7 D-12-FALLBACK + Approach A: tool_call="any" forces side_chat_tool.
+        local res, err = errors.with_retry(state.npc_id, "side_chat", function()
+            return state.runner:step(p, { tool_call = "any" })
+        end)
         result_ch:send({ res = res, err = err })
     end)
     local deadline = time.after(VOTE_CAP_S)
@@ -141,23 +119,17 @@ local function run_night_side_chat(state, raw)
         return
     end
 
+    -- Phase 7: structured args at response.tool_calls[1].arguments (Lua table).
     local res_table = {}
-    if type(rv_res) == "table" then
-        local inner = nil
-        for k, v in pairs(rv_res) do
-            if k == "result" and type(v) == "table" then inner = v end
-        end
-        res_table = inner or rv_res
+    if type(rv_res) == "table" and type(rv_res.tool_calls) == "table"
+       and type(rv_res.tool_calls[1]) == "table"
+       and type(rv_res.tool_calls[1].arguments) == "table" then
+        res_table = rv_res.tool_calls[1].arguments
     end
 
-    local side_chat_text = ""
-    local suggested_target_slot = nil
-    local reasoning = ""
-    for k, v in pairs(res_table) do
-        if k == "side_chat_text" then side_chat_text = tostring(v) end
-        if k == "suggested_target_slot" then suggested_target_slot = tonumber(v) end
-        if k == "reasoning" then reasoning = tostring(v) end
-    end
+    local side_chat_text        = tostring(res_table.side_chat_text or "")
+    local suggested_target_slot = res_table.suggested_target_slot and tonumber(res_table.suggested_target_slot) or nil
+    local reasoning             = tostring(res_table.reasoning or "")
 
     -- Defensive: keep suggestion in the living-target list; fall back if not.
     local valid = false
