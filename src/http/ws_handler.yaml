@@ -1,0 +1,18 @@
+version: "1.0"
+namespace: app.http
+
+entries:
+  # D-09 (Phase 8): name of the header Caddy forwards as identity.
+  # Set to "X-Authenticated-User" in .env for deploy; leave unset for dev.
+  # Phase 02 P05: env.get() only resolves declared env.variable entries.
+  - name: mafia_auth_header
+    kind: env.variable
+    storage: app:env
+    variable: MAFIA_AUTH_HEADER
+
+  # D-11 (Phase 8): comma-separated allowed WebSocket origins.
+  # Dev default: "http://localhost:8080". Prod: "https://mafia.example.com".
+  - name: mafia_ws_allowed_origins
+    kind: env.variable
+    storage: app:env
+    variable: MAFIA_WS_ALLOWED_ORIGINS
