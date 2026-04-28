@@ -8,7 +8,8 @@ export function useGameSocket(onFrame: FrameHandler) {
   useEffect(() => { onFrameRef.current = onFrame; }, [onFrame]);
 
   useEffect(() => {
-    const url = `ws://${window.location.host}/ws/`;
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const url = `${proto}//${window.location.host}/ws/`;
     const ws = new WebSocket(url);
     wsRef.current = ws;
     ws.onmessage = (ev) => {

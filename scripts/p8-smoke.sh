@@ -45,7 +45,8 @@ fi
 _8_9_host="${MAFIA_HOST:-}"
 if [ -d frontend/dist/assets ]; then
     if grep -q '"wss:"' frontend/dist/assets/*.js 2>/dev/null \
-       || grep -q "'wss:'" frontend/dist/assets/*.js 2>/dev/null; then
+       || grep -q "'wss:'" frontend/dist/assets/*.js 2>/dev/null \
+       || grep -q '`wss:`' frontend/dist/assets/*.js 2>/dev/null; then
         ok "8.9 frontend dist has wss:// scheme"
     elif [ "$MODE" = "full" ] && [ -n "$_8_9_host" ]; then
         miss "8.9 frontend dist is missing wss:// — rebuild with npm run build after fixing ws.ts"
