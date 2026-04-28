@@ -83,8 +83,11 @@ local function run_last_words(state, round)
     })
 
     -- Phase 7: agent runner response.result is the generated string directly.
-    local text = (type(rv_res) == "table" and type(rv_res.result) == "string") and rv_res.result or ""
-    if type(text) ~= "string" then text = tostring(text) end
+    -- Hoisted out of an `and/or` chain so luals can narrow rv_res through the type guard.
+    local text = ""
+    if type(rv_res) == "table" and type(rv_res.result) == "string" then
+        text = rv_res.result
+    end
 
     -- Non-empty guard preserved: wrong runner contract or empty result silently
     -- returns "" which would break NPC-09 (no last-words). The assert fires
