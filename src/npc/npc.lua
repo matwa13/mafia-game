@@ -25,6 +25,7 @@ local turn_last_words = require("turn_last_words")
 local errors          = require("errors")
 local suspicion       = require("suspicion")
 local event_log       = require("event_log")
+local agent_context   = require("agent_context")
 
 -- Section L: main loop + boot -----------------------------------------------
 
@@ -307,6 +308,34 @@ local function run(args)
         last_pick         = nil,
         last_dynamic_tail = nil,
     }
+
+    -- 6b. Phase 7 D-04: Create per-NPC agent context + runner (inline spec).
+    -- Done ONCE per NPC process lifetime. The agent's `prompt` field is the
+    -- byte-identical persona stable_block; runner:step calls in turn handlers
+    -- inject only the dynamic user message via the conversation argument.
+    -- Persona drift tripwire (assert_stable_hash) still anchors on
+    -- render_stable_block(persona_args) — see prompts.lua, Plan 07-03.
+    local ctx = agent_context.new()
+    local runner, load_err = ctx:load_agent({
+        id          = NPC_ID,
+        name        = NPC_ID,
+        prompt      = stable_block,
+        model       = "claude-haiku-4-5",
+        max_tokens  = 512,
+        temperature = 0,
+    })
+    if load_err then
+        logger:error("[npc] agent_context:load_agent failed", {
+            npc = NPC_ID, err = tostring(load_err),
+        })
+        -- D-08 invariant: NPC errors are return values, never crashes.
+        -- RESEARCH.md line 370 sample uses error() but predates D-08 lock —
+        -- the clean return path is canonical here. Supervisor sees a normal
+        -- exit; no unhandled Lua error escapes the NPC process.
+        return
+    end
+    state.ctx    = ctx
+    state.runner = runner
 
     -- 7. Main loop.
     main_loop(state, public_sub, mafia_sub, system_sub,
