@@ -54,3 +54,10 @@ entries:
         value: app.processes:host
       - name: env_storage
         value: app:env
+
+  # Binds the wippy/agent module. No ns.requirements to wire — agent
+  # delegates LLM/env needs to wippy/llm (already wired via dep.llm).
+  - name: dep.agent
+    kind: ns.dependency
+    component: wippy/agent
+    version: "*"
