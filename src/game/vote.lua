@@ -1,6 +1,7 @@
 -- src/game/vote.lua
 -- Two-stage informed voting non-negotiable (CLAUDE.md): private suspicion update →
--- llm.structured_output returning {vote_target, reasoning, suspicion_updates}.
+-- agent runner:step with tool_call="any" returning {vote_target, reasoning, suspicion_updates}
+-- (Phase 7: schema-as-tool dispatch via app.npc.agents:vote_tool).
 -- LOOP-08 (simultaneous voting): vote.prompt sent to ALL alive NPCs before any reply.
 -- LOOP-09 (tie handling): tied max → NO elimination; publish vote.tied → next Night.
 -- LOOP-10 (win check): check_win runs after every elimination (post-vote + post-night).
