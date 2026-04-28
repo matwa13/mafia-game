@@ -77,6 +77,7 @@ entries:
       - json
 
   # D-05 (Phase 6): Day-chat turn handler — run_chat_turn.
+  # Phase 7: agent runner consumed via state.runner (set in npc.lua process init).
   - name: turn_chat
     kind: library.lua
     source: file://turn_chat.lua
@@ -86,7 +87,6 @@ entries:
       - sql
       - json
     imports:
-      llm: wippy.llm:llm
       pe: app.lib:events
       prompts: app.npc:prompts
       errors: app.npc:errors
@@ -146,6 +146,7 @@ entries:
       event_log: app.npc:event_log
 
   # D-05 (Phase 6): Last-words turn handler — run_last_words (NPC-09).
+  # Phase 7: agent runner consumed via state.runner; prompt.new() still used for user msg.
   - name: turn_last_words
     kind: library.lua
     source: file://turn_last_words.lua
@@ -155,7 +156,6 @@ entries:
       - sql
       - json
     imports:
-      llm: wippy.llm:llm
       pe: app.lib:events
       prompt: wippy.llm:prompt
       prompts: app.npc:prompts
