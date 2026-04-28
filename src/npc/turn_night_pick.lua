@@ -65,11 +65,14 @@ local function run_night_pick(state, raw)
         round, names_str, slots_str)
     p:add_user(tail .. directive)
 
+    assert(state.tool_runner ~= nil, "tool_runner missing — npc.lua init order broken")
     local result_ch = channel.new(1)
     coroutine.spawn(function()
-        -- Phase 7 D-12-FALLBACK + Approach A: tool_call="any" forces night_pick_tool.
+        -- Phase 7 D-12-FALLBACK + Approach A: named tool_call forces
+        -- pick_night_target (llm_alias of night_pick_tool). Uses tool_runner
+        -- (per-NPC second runner with the three schema-as-tool entries).
         local res, err = errors.with_retry(state.npc_id, "night_pick", function()
-            return state.runner:step(p, { tool_call = "any" })
+            return state.tool_runner:step(p, { tool_call = "pick_night_target" })
         end)
         result_ch:send({ res = res, err = err })
     end)

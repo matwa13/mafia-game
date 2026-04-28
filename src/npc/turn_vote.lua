@@ -32,16 +32,18 @@ local function run_vote_turn(state, round)
     -- init and inherited via the state table. If this assert fires, npc.lua init
     -- order is broken or library.lua state inheritance changed — fix at the source,
     -- do NOT add a defensive default here. Plan 04 confirmed this contract holds
-    -- for turn_chat / turn_last_words; turn_vote inherits the same plumbing.
-    assert(state.runner ~= nil, "runner missing — npc.lua init order broken")
+    -- for turn_chat / turn_last_words; turn_vote uses state.tool_runner
+    -- (the second per-NPC runner with schema-as-tool entries registered).
+    assert(state.tool_runner ~= nil, "tool_runner missing — npc.lua init order broken")
     local result_ch = channel.new(1)
     coroutine.spawn(function()
-        -- Phase 7 D-12-FALLBACK + Approach A: runner:step with tool_call="any"
-        -- forces the LLM to invoke vote_tool (registered in src/npc/agents/_index.yaml).
-        -- Structured args are validated against meta.input_schema and surfaced
-        -- via response.tool_calls[1].arguments.
+        -- Phase 7 D-12-FALLBACK + Approach A: runner:step with named tool_call
+        -- forces the LLM to invoke cast_vote (the llm_alias of vote_tool —
+        -- registered in src/npc/agents/_index.yaml). Structured args are
+        -- validated against meta.input_schema and surfaced via
+        -- response.tool_calls[1].arguments.
         local res, err = errors.with_retry(state.npc_id, "vote", function()
-            return state.runner:step(p, { tool_call = "any" })
+            return state.tool_runner:step(p, { tool_call = "cast_vote" })
         end)
         result_ch:send({ res = res, err = err })
     end)

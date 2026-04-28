@@ -40,11 +40,18 @@ local function build_chat_prompt(state, is_mandatory)
     -- follow-up, not an optional skip. This eliminates the DECLINE token
     -- entirely — the LLM has no reason to emit it because it's not in the
     -- prompt anymore.
+    --
+    -- Phase 7 brevity tightening: pre-Phase-7 the `llm.generate` direct call
+    -- reliably produced 1-2 sentence outputs. Under the agent runner the LLM
+    -- treats the inline directive less strictly, so the cap is restated as
+    -- a HARD LIMIT and given a "STOP at" rule to lean on Claude's
+    -- instruction-following without changing max_tokens (which would also
+    -- truncate the structured tool_calls used by vote/night_pick/side_chat).
     local directive
     if is_mandatory then
-        directive = "\n\n===SPEAK NOW — OPENING===\nIt's your turn to open. In 1-2 short sentences (max ~40 words), share your read on the day so far. Address other players by name when you accuse, defend, or question. Do NOT write paragraphs."
+        directive = "\n\n===SPEAK NOW — OPENING===\nHARD LIMIT: 2 sentences max, 40 words max. STOP at the second period even mid-thought. Do NOT explain your reasoning. Do NOT apologize or hedge. Do NOT add disclaimers. Share your read on the day so far. Address other players by name when you accuse, defend, or question."
     else
-        directive = "\n\n===SPEAK NOW — FOLLOW-UP===\nAdd ONE short follow-up sentence (max ~25 words) that reacts to what was just said. Sharpen an accusation, defend yourself, or call out someone's silence. Always say something concrete — no filler."
+        directive = "\n\n===SPEAK NOW — FOLLOW-UP===\nHARD LIMIT: 1 sentence, 25 words max. STOP at the period. React to what was just said — sharpen an accusation, defend yourself, or call out someone's silence. Say one concrete thing. Do NOT explain or hedge."
     end
     p:add_user(tail .. directive)
     return p
