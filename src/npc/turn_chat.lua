@@ -1,22 +1,22 @@
 -- src/npc/turn_chat.lua
 -- D-05 (Phase 6): Day-chat turn handler — run_chat_turn.
+-- Phase 7: migrated from llm direct calls to the wippy/agent runner:step call.
 -- Two-pass round-robin non-negotiable: every alive NPC speaks an opening then a follow-up.
 -- Both turns are mandatory; the defensive DECLINE-strip enforces it (Phase 3.1 polish).
--- Phase 3.1 UX: no chunk streaming — orchestrator publishes typing.started/ended; SPA
+-- Phase 3.1 UX: no chunk streaming - orchestrator publishes typing.started/ended; SPA
 -- renders a typing bubble. Full text committed atomically when ready.
 
 local logger    = require("logger"):named("turn_chat")
 local time      = require("time")
 local sql       = require("sql")
 local json      = require("json")
-local llm       = require("llm")
 local pe        = require("pe")
 local prompts   = require("prompts")
 local errors    = require("errors")
 local event_log = require("event_log")
 
-local MODEL      = "claude-haiku-4-5"
-local CHAT_CAP_S = "22s"    -- streaming window
+-- Phase 7: MODEL constant removed - model is set in agent definition (npc.lua ctx:load_agent).
+local CHAT_CAP_S = "22s"    -- streaming-window deadline (preserved for race)
 
 local function run_chat_turn(state, round, is_mandatory)
     prompts.assert_stable_hash(state)
@@ -27,12 +27,19 @@ local function run_chat_turn(state, round, is_mandatory)
 
     -- Blocking generate in a coroutine so the main select loop can still
     -- race a deadline, CANCEL, and abort.turn against the LLM call.
+    -- Phase 7 architectural contract pin: state.runner is set in npc.lua process
+    -- init and inherited via the state table. If this assert fires, npc.lua init
+    -- order is broken or library.lua state inheritance changed — fix at the source,
+    -- do NOT add a defensive default here.
+    assert(state.runner ~= nil, "runner missing — npc.lua init order broken")
     local result_ch = channel.new(1)
     coroutine.spawn(function()
-        local res, err = llm.generate(p, {
-            model = MODEL,
-            max_tokens = 80,
-        })
+        -- Phase 7 D-12-FALLBACK: retry wrapper around the runner call.
+        -- Blocking (no streaming target) — preserves the typing-indicator UX
+        -- (atomic commit on chat.submit).
+        local res, err = errors.with_retry(state.npc_id, "chat", function()
+            return state.runner:step(p, {})
+        end)
         result_ch:send({ res = res, err = err })
     end)
 
@@ -78,7 +85,8 @@ local function run_chat_turn(state, round, is_mandatory)
                 })
                 return
             end
-            local full = errors.extract_generate_text(rv_res)
+            -- Phase 7: agent runner response.result is already a string.
+            local full = (type(rv_res) == "table" and type(rv_res.result) == "string") and rv_res.result or ""
             -- Defensive: strip a trailing "DECLINE" / "DECLINED" token in
             -- case the model echoes the word from cached context. Both
             -- turns are mandatory; DECLINE is never instructed.
