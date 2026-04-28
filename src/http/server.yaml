@@ -4,6 +4,9 @@ namespace: app.http
 entries:
   - name: server
     kind: http.service
+    # D-05 / T-08-04 (Phase 8): loopback bind is the SOLE mitigation against
+    # direct-port access bypassing Caddy's basic_auth gate. NEVER change to
+    # 0.0.0.0:8080 — Caddy reaches us at 127.0.0.1:8080 via reverse_proxy.
     addr: "127.0.0.1:8080"
     timeouts:
       read: "5s"

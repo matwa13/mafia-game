@@ -1,0 +1,52 @@
+# deploy/Caddyfile.example
+#
+# Phase 8 (D-01, D-03, D-05, D-07, D-13): production Caddy config for the
+# Single-Player Mafia MVP small-team deploy.
+#
+# Operator workflow:
+#   1. Copy this file to /etc/caddy/Caddyfile on the VPS.
+#   2. Replace `mafia.example.com` with the real domain.
+#   3. Run `caddy hash-password` for each teammate, paste each $2a$14$… hash
+#      into the basic_auth block (one line per teammate). Hashes are bcrypt.
+#   4. Ensure DNS A/AAAA → VPS public IP; ports 80 + 443 open to internet.
+#   5. `systemctl reload caddy` (or `caddy reload` if running standalone).
+#
+# Security contract:
+#   * basic_auth at the site level covers HTTP routes AND the WebSocket
+#     upgrade — Caddy enforces auth before the protocol switch. (T-08-01,
+#     T-08-02 mitigated.)
+#   * TLS is auto-provisioned via Let's Encrypt; HTTP-01 challenge runs on
+#     port 80, certs renew automatically. (D-05.)
+#   * The `header` block emits the five required response headers; the CSP
+#     covers `wss://mafia.example.com` so the WebSocket connect is allowed.
+#     (D-13.)
+#   * `reverse_proxy 127.0.0.1:8080` reaches the wippy upstream on its
+#     loopback bind (see src/http/server.yaml). `header_up X-Authenticated-User
+#     {http.auth.user.id}` injects the authenticated username — wippy's
+#     ws_handler.lua reads this and uses it as metadata.user_id. (D-07.)
+
+mafia.example.com {
+    # (1) Site-wide Basic Auth — covers HTTP AND WebSocket upgrade (D-03 / T-08-01 / T-08-02).
+    # Add one line per teammate. Generate hash: caddy hash-password
+    basic_auth {
+        alice $2a$14$HASH_FOR_ALICE_PASSWORD_HERE
+        bob   $2a$14$HASH_FOR_BOB_PASSWORD_HERE
+    }
+
+    # (2) Security response headers (D-13 / T-08-09).
+    # CSP: 'self' is sufficient — Vite build produces no inline scripts.
+    # 'wss://mafia.example.com' covers the WebSocket connect-src.
+    header {
+        Content-Security-Policy "default-src 'self'; connect-src 'self' wss://mafia.example.com; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+        X-Frame-Options "DENY"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    }
+
+    # (3) Forward authenticated username to upstream (D-07).
+    # {http.auth.user.id} is populated after successful basic_auth.
+    reverse_proxy 127.0.0.1:8080 {
+        header_up X-Authenticated-User {http.auth.user.id}
+    }
+}

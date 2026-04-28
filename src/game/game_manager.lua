@@ -176,8 +176,10 @@ local function handle_game_start(state, payload)
     local insert_ok, insert_err = insert_game_row(game_id, rng_seed, player_slot)
     if not insert_ok then
         logger:error("[game_manager] games.insert failed", { err = insert_err })
+        -- D-12 / T-08-06 (Phase 8): opaque code on the wire; raw error stays
+        -- in logger:error above. Convention follows game_plugin.lua line 118.
         process.send(driver_pid, "game.started", {
-            error = "games.insert failed: " .. tostring(insert_err),
+            error = "GAME_START_FAILED",
         })
         return
     end
@@ -187,8 +189,10 @@ local function handle_game_start(state, payload)
     if not orch_pid then
         logger:error("[game_manager] orchestrator spawn failed",
             { game_id = game_id, err = tostring(spawn_err) })
+        -- D-12 / T-08-06 (Phase 8): opaque code on the wire; raw error stays
+        -- in logger:error above. Convention follows game_plugin.lua line 151.
         process.send(driver_pid, "game.started", {
-            error = "orchestrator spawn failed: " .. tostring(spawn_err),
+            error = "ORCHESTRATOR_SPAWN_FAILED",
         })
         return
     end
