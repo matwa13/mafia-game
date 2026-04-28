@@ -13,5 +13,5 @@ entries:
     prefix: /ws
     post_middleware:
       - websocket_relay
-    post_options:
-      wsrelay.allowed.origins: "http://localhost:8080"
+    # D-11 / RESEARCH K2: origin enforcement lives in ws_handler.lua (env-driven), not here. YAML cannot interpolate env vars.
+    post_options: {}
