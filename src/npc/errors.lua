@@ -1,11 +1,12 @@
 -- src/npc/errors.lua
 -- D-05 (Phase 6): LLM error classification + persistence + retry.
+-- Phase 7: classify() substring patterns confirmed against wippy/agent error
+-- strings (07-VERIFY.md Q6); extract_generate_text marked LEGACY (turn handlers
+-- now read response.result / response.tool_calls[1].arguments directly).
 -- Non-negotiable: bounded-retry-no-supervisor-restart — LLM errors are return values,
 -- never unhandled Lua errors. 2 retries, exp backoff (1s, 3s). Retryable: RATE_LIMIT /
 -- SERVER_ERROR / TIMEOUT / NETWORK_ERROR. Final fallback always persisted to SQL errors table.
 -- Phase 1 D-07: every retry attempt + final fallback each write one row to errors table.
--- extract_generate_text lives here (Phase 6 Step B Decision): shared by turn_chat +
--- turn_last_words; semantic neighbor of error classification.
 
 local logger = require("logger"):named("errors")
 local time   = require("time")
@@ -16,7 +17,11 @@ local BACKOFFS    = { "1s", "3s" }
 
 --- Classify an LLM error. Retryable for RATE_LIMIT/SERVER_ERROR/TIMEOUT/
 --- NETWORK_ERROR; everything else is a one-shot fallback. Accepts both
---- table errors and string errors (npc_test.lua:52-68 verbatim pattern).
+--- table errors (legacy framework/llm shape) and string errors (wippy/agent shape).
+--- Phase 7: agent runner returns string errors. The substring matches below
+--- (rate_limit / server_error / timeout / network) hit on the agent's error
+--- strings (verified in 07-VERIFY.md Q6). Table-form match path remains for
+--- backward-compat with framework/llm direct call sites if any survive.
 local function classify(err)
     if not err then return { retryable = false, reason = "ok" } end
     local err_str = tostring(err)
@@ -88,13 +93,16 @@ local function with_retry(npc_id, call_type, fn)
     end
 end
 
+--- LEGACY (Phase 6): unwraps framework/llm normalize_response into a string.
+--- Phase 7: live runtime turn handlers (turn_chat, turn_last_words) read
+--- response.result directly from runner:step. This function is kept for the
+--- Phase 1 legacy npc_test.lua harness and any future agent-error-response
+--- normalization. Do NOT call from new code — read response.result from
+--- runner:step instead.
 local function extract_generate_text(res)
     -- Authoritative Wippy shape (from vendor/wippy/llm/llm.lua normalize_response):
     --   { result = <string>, tokens, finish_reason, metadata, tool_calls }
     -- where `result` is the generated text itself as a STRING.
-    -- Fallbacks below cover plain-string returns and tables that may carry
-    -- `content`/`text` at the top level or nested — only used if `result`
-    -- is missing.
     if type(res) == "string" then return res end
     if type(res) ~= "table" then return "" end
     -- Canonical case: result is a string.
