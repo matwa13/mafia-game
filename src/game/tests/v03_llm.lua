@@ -198,12 +198,14 @@ local function test_interjection_visible(inbox, gm_pid)
         log_fail(name, "no game_id in payload")
         return
     end
-    -- Wait until Day-1 is active (round 1 phase='day' row exists).
+    -- WR-06 (Phase 10): rounds.phase IS written by end_game.record_round_phase
+    -- since Phase 6. Wait up to 5s for the orchestrator to reach Day-1
+    -- (real-LLM Night 1 picks + 3s min-dwell + Begin-Day gate ≈ 4s typical).
     local day_ok = poll_until(function()
         local r = get_row("SELECT phase FROM rounds WHERE game_id = ? AND round = 1", game_id)
         if r and r.phase == "day" then return true, r end
         return false, nil
-    end, 20, "200ms")
+    end, 25, "200ms")
     if not day_ok then
         log_fail(name, "Day-1 never started for game " .. game_id)
         return
