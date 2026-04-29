@@ -113,7 +113,7 @@ function SetupScreen({ onStart }: { onStart: (name: string, seed?: number) => vo
   return (
     <div className="min-h-screen flex items-center justify-center">
       <div className="max-w-[560px] w-full text-center space-y-8 px-4">
-        <h1 className="text-2xl font-semibold">MAFIA — MVP</h1>
+        <h1 className="text-2xl font-semibold">MAFIA</h1>
         <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>
           5 NPCs. One human. One vote.
         </p>
