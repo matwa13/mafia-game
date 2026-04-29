@@ -31,6 +31,11 @@ local function sanitize_user_id(raw)
     if type(raw) ~= "string" then return nil end
     local id = raw:lower():match("^([%w%-_/]+)$")
     if not id or #id == 0 or #id > 32 then return nil end
+    -- WR-01 fix (Phase 10): require at least one alphanumeric so '/',
+    -- '////', '/local-player', '_', '____' are all rejected. Without this
+    -- guard a misconfigured Caddy or upstream auth source could land every
+    -- teammate in the same punctuation-only bucket (data-isolation break).
+    if not id:find("%w") then return nil end
     if RESERVED_IDS[id] then return nil end
     return id
 end
