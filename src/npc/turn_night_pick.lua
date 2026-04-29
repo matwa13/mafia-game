@@ -46,7 +46,6 @@ local function run_night_pick(state, raw)
     local tail = visible_context(state.npc_id, {
         role = state.role,
         event_log = state.event_log or {},
-        roster = state.roster or {},
         suspicion = state.suspicion,
         roster_names = state.roster_names,
         slot = state.slot,

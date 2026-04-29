@@ -11,24 +11,16 @@ local function visible_context(npc_id, state, mode)
     local lines = {}
 
     -- 1. ROSTER BLOCK (NPC-06 — NPCs need names to address each other).
-    -- Prefer state.roster_names (the live per-game map from the orchestrator,
-    -- {[slot]=name}) because state.roster is currently always empty (WR-04).
-    -- Fallback to state.roster only for legacy callers that pre-populate it.
+    -- roster_names is the live per-game map {[slot]=name} from the orchestrator,
+    -- populated at NPC spawn. WR-04 (Phase 3.1 polish): the legacy NPC-side
+    -- roster fallback was deleted in Phase 10 — roster_names is the sole roster source.
     table.insert(lines, "===ROSTER===")
     local roster_names = state.roster_names
-    if roster_names and next(roster_names) ~= nil then
+    if roster_names then
         for slot = 1, 6 do
             local name = roster_names[slot]
             if name and name ~= "" then
                 table.insert(lines, "- " .. name)
-            end
-        end
-    else
-        for _, entry in ipairs(state.roster or {}) do
-            if entry.alive then
-                table.insert(lines, "- " .. entry.name .. " (alive)")
-            else
-                table.insert(lines, "- " .. entry.name .. " (eliminated)")
             end
         end
     end

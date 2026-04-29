@@ -25,7 +25,6 @@ local function run_last_words(state, round)
     local tail = visible_context(state.npc_id, {
         role = state.role,
         event_log = state.event_log or {},
-        roster = state.roster or {},
         roster_names = state.roster_names,
         slot = state.slot,
     }, "chat")
