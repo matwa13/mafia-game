@@ -87,10 +87,22 @@ local function run_chat_turn(state, round, is_mandatory)
             end
             -- Phase 7: agent runner response.result is already a string.
             local full = (type(rv_res) == "table" and type(rv_res.result) == "string") and rv_res.result or ""
-            -- Defensive: strip a trailing "DECLINE" / "DECLINED" token in
-            -- case the model echoes the word from cached context. Both
-            -- turns are mandatory; DECLINE is never instructed.
-            full = full:gsub("[%s%p]*[Dd][Ee][Cc][Ll][Ii][Nn][Ee][Dd]?[%s%p]*$", "")
+            -- Defensive: detect and strip "DECLINE" / "DECLINED" tokens that the
+            -- model may echo from cached context. Both turns are mandatory; DECLINE
+            -- is never instructed (see prompts.lua lines 39-58). If the LLM only
+            -- emits DECLINE (whole-reply or leading-token forms), treat the turn
+            -- as a soft skip — the orchestrator's chat.submit handler tolerates
+            -- empty text and the per-speaker cap progresses to the next NPC.
+            local trimmed = full:gsub("^%s+", ""):gsub("%s+$", "")
+            if trimmed:match("^[Dd][Ee][Cc][Ll][Ii][Nn][Ee][Dd]?[%s%p]*$") then
+                -- Whole reply is a DECLINE token (e.g. "DECLINE", "DECLINED.", "decline ").
+                full = ""
+            else
+                -- Strip leading "DECLINE because..." preamble.
+                full = full:gsub("^%s*[Dd][Ee][Cc][Ll][Ii][Nn][Ee][Dd]?[%s%p]+", "")
+                -- Strip trailing "...DECLINE" / "...DECLINED" tail (preserved from prior fix).
+                full = full:gsub("[%s%p]+[Dd][Ee][Cc][Ll][Ii][Nn][Ee][Dd]?[%s%p]*$", "")
+            end
             process.send(parent_pid, "chat.submit", {
                 from_slot = state.slot, round = round,
                 text = full, kind = "npc",
