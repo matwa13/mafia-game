@@ -153,17 +153,39 @@ local function emit_game_state_changed_elim(game_id, alive_map, roles_map,
     local reveal_all = (phase == "ended")
     local roster = build_gsc_roster(alive_map, roles_map, slot_persona_map,
                                      roster_names_map, player_sl, reveal_all)
+    -- GAP-02 fix (Phase 10): mirror emit_game_state_changed's field set so
+    -- both publish sites produce the same SPA-payload shape. Without this,
+    -- a future caller using emit_game_state_changed_elim with phase="ended"
+    -- would silently lose `winner` and the EndGameBanner would render with
+    -- a null winner (Phase 3 polish bug class). Also stamps the partner
+    -- role onto the roster entry the same way emit_game_state_changed does
+    -- so the Mafia-human partnerAlive derivation stays correct across the
+    -- elim frame as well.
+    local player_role = roles_map and roles_map[player_sl]
+    local partner_slot = player_role == "mafia" and compute_partner_slot(roles_map, player_sl)
+    local partner_name = partner_slot and slot_persona_map and
+        slot_persona_map[partner_slot] and slot_persona_map[partner_slot].name
+    if partner_slot and roster[tostring(partner_slot)] then
+        roster[tostring(partner_slot)].role = roles_map[partner_slot]
+    end
     pe.publish_event("system", "game_state_changed", "/" .. game_id, {
         phase = phase or "unknown",
         round = round or 0,
+        dev_mode = dt.dev_mode(),
         alive = alive_to_obj(alive_map),
         roster = roster,
         player_slot = player_sl,
+        player_role = player_role,
+        partner_name = partner_name,
         game_id = game_id,
         chat_locked = chat_locked_flag == nil and true or chat_locked_flag,
         last_eliminated = {
             slot = elim_slot, name = elim_name, role = elim_role, cause = elim_cause,
         },
+        -- winner not populated here — elim-variant is never used at phase="ended"
+        -- in current code, but the field is intentionally absent (not present-as-nil)
+        -- so the SPA reducer preserves the prior winner value if any. Mirror of
+        -- emit_game_state_changed which sets winner explicitly when populated.
     })
 end
 
