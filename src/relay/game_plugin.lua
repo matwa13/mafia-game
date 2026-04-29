@@ -190,10 +190,10 @@ local function run(args)
                             })
                             got_reply = true
                         elseif reply_topic == "game.start.failed" then
-                            local ferr = (reply_msg:payload() and reply_msg:payload():data()) or {}
-                            forward(conn_pid, "game_error", {
-                                code = "GAME_START_FAILED", error = tostring(ferr.error or "unknown"),
-                            })
+                            -- IN-03 fix (Phase 10): T-08-06 pattern compliance — opaque
+                            -- code only. Raw error strings stay in server logs (game_manager
+                            -- already logs them via logger:error); the SPA routes by `code`.
+                            forward(conn_pid, "game_error", { code = "GAME_START_FAILED" })
                             got_reply = true
                         end
                         -- Any other topic during the wait window is dropped (no active game yet).
