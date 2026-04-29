@@ -20,6 +20,20 @@ local function compute_partner_slot(roles, target_slot)
     return nil
 end
 
+-- WR-02 fix (Phase 10): Wippy's JSON encoder serializes dense integer-keyed
+-- Lua tables as JSON arrays (0-indexed on the wire). After eliminations,
+-- `state.alive` may also become sparse ({[1]=true,[3]=false,...}) which
+-- triggers `cannot encode sparse array: non-contiguous numeric keys` and
+-- breaks the WS write. Build a string-keyed mirror so the encoder always
+-- emits a JSON object. Companion to the roster string-keying at line 80.
+local function alive_to_obj(alive_map)
+    local obj = {}
+    for slot = 1, 6 do
+        obj[tostring(slot)] = (rawget(alive_map, slot) == true)
+    end
+    return obj
+end
+
 -- Publish system/game_state_changed snapshot on every phase transition.
 -- Takes explicit fields to avoid wippy-lint struct-shape union issues (same
 -- pattern as run_night_stub / run_day_discussion).
@@ -116,7 +130,7 @@ local function emit_game_state_changed(game_id, alive_map, roles_map,
         phase = phase or "unknown",
         round = round or 0,
         dev_mode = dt.dev_mode(),   -- D-DEV-04: SPA reads this to render DEV chip
-        alive = alive_map,
+        alive = alive_to_obj(alive_map),
         roster = roster,
         player_slot = player_sl,
         player_role = player_role,
@@ -142,7 +156,7 @@ local function emit_game_state_changed_elim(game_id, alive_map, roles_map,
     pe.publish_event("system", "game_state_changed", "/" .. game_id, {
         phase = phase or "unknown",
         round = round or 0,
-        alive = alive_map,
+        alive = alive_to_obj(alive_map),
         roster = roster,
         player_slot = player_sl,
         game_id = game_id,
