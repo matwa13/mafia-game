@@ -135,16 +135,23 @@ end
 -- Tally: return (top_slot, tied_slots_array, tally_map).
 -- tied_slots_array has >=2 entries IFF there is a tie at the max.
 -- top_slot is nil on empty map OR on tie.
+-- WR-03 fix (Phase 10): tally keyed by tostring(slot) so the JSON encoder
+-- always emits an object, never a sparse array. Mirrors the pattern at
+-- run_vote_round_llm:319-323. Local consumers below coerce keys back to
+-- integers via tonumber.
 local function tally_votes(votes_map)
     local tally = {}
     for _, target in pairs(votes_map) do
-        if target ~= nil then tally[target] = (tally[target] or 0) + 1 end
+        if target ~= nil then
+            local k = tostring(target)
+            tally[k] = (tally[k] or 0) + 1
+        end
     end
     local max_count = 0
     for _, c in pairs(tally) do if c > max_count then max_count = c end end
     local tied = {}
-    for slot, c in pairs(tally) do
-        if c == max_count then table.insert(tied, slot) end
+    for k, c in pairs(tally) do
+        if c == max_count then table.insert(tied, tonumber(k)) end
     end
     table.sort(tied)
     if max_count == 0 then return nil, {}, tally end  -- no votes at all
