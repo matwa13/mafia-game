@@ -8,7 +8,6 @@
 
 local logger      = require("logger"):named("intro")
 local channel     = require("channel")
-local pe          = require("pe")
 local game_state  = require("game_state")
 local dev_telemetry = require("dev_telemetry")
 
