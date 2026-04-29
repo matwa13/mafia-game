@@ -13,9 +13,17 @@
 --     chat_send   {text, round?}
 --     vote_cast   {vote_for_slot, round}
 --   outbound (plugin -> browser, wrapped by websocket_relay as {topic, data}):
---     game_state_changed, game_chat_chunk, game_chat_line, game_chat_locked,
---     game_eliminated, game_vote_tied, game_votes_revealed, game_game_ended,
---     game_error.
+--     game_state_changed, game_chat_line, game_chat_locked,
+--     game_eliminated (covers both player.eliminated and night.resolved — same client shape),
+--     game_vote_tied, game_vote_cast_received, game_votes_revealed,
+--     game_discussion_ready, game_vote_complete, game_night_ready_for_day,
+--     game_game_ended, game_npc_skipped,
+--     game_typing_started, game_typing_ended.
+--   NOTE: NPC chat is non-streaming since Phase 3 polish — the SPA renders
+--   a typing indicator (game_typing_started / game_typing_ended) while the
+--   LLM call is in flight, then commits the full message atomically as
+--   game_chat_line. Any pre-Phase-3 reference to a `game_chat_chunk` topic
+--   is obsolete (typing-indicator-not-streaming flow invariant; see CLAUDE.md).
 --
 -- Orchestrator contract:
 --   plugin -> orchestrator: process.send(orch_pid, "player.chat"|"vote.cast", payload)
