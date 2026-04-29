@@ -237,7 +237,8 @@ end
 
 -- ──────────────────────────────────────────────────────────────────
 -- V-03-08 loop-04-turn-count: each alive NPC slot (2..6) spoke 1-2 times
--- in Day-1. Waits for rounds.ended_at to be set before counting.
+-- in Day-1. Waits for the first vote row (real day-end signal) before
+-- counting NPC turns.
 -- ──────────────────────────────────────────────────────────────────
 local function test_turn_count(game_id)
     local name = "V-03-08 loop-04-turn-count"
@@ -245,10 +246,16 @@ local function test_turn_count(game_id)
         log_skip(name, "no game_id available from V-03-01")
         return
     end
-    -- Wait for round 1 day phase to end.
+    -- WR-06 fix (Phase 10): the orchestrator never sets a round-level finish
+    -- timestamp on the rounds table (only games-level shutdown is timestamped
+    -- in end_game.shutdown_cascade). Use the first votes-table row for this
+    -- game as the day-end signal — votes are persisted only by
+    -- run_vote_round_llm, which runs after day-discussion exits. 30s budget
+    -- covers the worst-case real-LLM 5×NPC×2-pass discussion + 5×vote.
     poll_until(function()
-        local r = get_row("SELECT ended_at FROM rounds WHERE game_id = ? AND round = 1 AND phase = 'day'", game_id)
-        if r and r.ended_at then return true, r end
+        local r = get_row("SELECT COUNT(*) AS n FROM votes WHERE game_id = ? AND round = 1", game_id)
+        local n = r and tonumber(r.n) or 0
+        if n >= 1 then return true, r end
         return false, nil
     end, 30, "500ms")
     -- Count npc messages per slot.
