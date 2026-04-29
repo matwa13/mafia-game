@@ -125,6 +125,19 @@ local function run(args)
                 if not gm_pid then
                     forward(conn_pid, "game_error", { code = "NO_GAME_MANAGER" })
                 else
+                    -- GAP-03 fix (Phase 10): defensive clear of any stale
+                    -- `active` bookkeeping from a prior game that ended in
+                    -- this plugin process. Today the game.ended event-loop
+                    -- branch (line ~322) clears active, but the SPA could
+                    -- send a fresh `start` BEFORE that event arrives if the
+                    -- network reorders. Clearing here closes the window.
+                    -- Do NOT call unsubscribe() — chat_ch/sys_ch subscription
+                    -- is reused via ensure_subscribed() below; only mafia is
+                    -- per-game-conditional on player_role.
+                    if active ~= nil then
+                        unsubscribe_mafia()
+                        active = nil
+                    end
                     -- Sanitize + clamp the player name (V5 input validation).
                     -- Empty / missing → default "Player" so the game can still
                     -- start; the SPA is supposed to require non-empty at the
