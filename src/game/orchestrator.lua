@@ -536,7 +536,8 @@ local function run(args)
         else
             ok_day, day_err = day.run_day_discussion(
                 game_id, state.round, state.alive, state.player_slot, state.npc_pids,
-                dev and "3s" or "60s", dev and 100 or 500, dev, state.chat_seq, inbox)
+                dev and "3s" or "60s", dev and 100 or 500, dev, state.chat_seq, inbox,
+                state.roles, state.slot_persona, state.roster_names)
         end
         if not ok_day then
             logger:error("[orchestrator] run_day_discussion failed",
@@ -548,8 +549,13 @@ local function run(args)
         end_game.record_round_phase(game_id, state.round, "vote")
 
         state.phase = "vote"
-        emit_game_state_changed(game_id, state.alive, state.roles, state.slot_persona,
-            state.roster_names, player_slot, "vote", state.round, false)
+        -- WR-05 fix (Phase 10): day.lua already publishes the vote-phase
+        -- game_state_changed with chat_locked=true at end of discussion
+        -- (run_day_discussion_streaming line 441; run_day_discussion stub
+        -- mode end-of-loop). Republishing here with chat_locked=false caused
+        -- a flip-flop the SPA observed mid-phase. The dev-event tail update
+        -- + dev_snapshot are still useful (they track that the orchestrator
+        -- entered vote phase), so they remain.
         append_dev_event(state, "system", "game_state_changed", "/" .. game_id)
         emit_dev_snapshot(state)
 

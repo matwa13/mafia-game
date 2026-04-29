@@ -57,7 +57,8 @@ end
 -- All in-repo deadlines use `time.after(...)`. Authority: src/probes/probe.lua,
 -- src/npc/test_driver.lua, src/npc/npc_test.lua.
 local function run_day_discussion(game_id, round, alive, player_slot, npc_pids,
-                                  day_duration, pacing_ms, dev, chat_seq, inbox)
+                                  day_duration, pacing_ms, dev, chat_seq, inbox,
+                                  roles, slot_persona, roster_names)
     local order = speaking_order(alive, player_slot)
     if #order == 0 then
         logger:warn("[orchestrator] run_day_discussion: empty speaking order")
@@ -171,6 +172,15 @@ local function run_day_discussion(game_id, round, alive, player_slot, npc_pids,
     pe.publish_event("system", "chat_locked", "/" .. game_id, {
         round = round, reason = reason,
     })
+    -- WR-05 fix (Phase 10): publish the vote-phase snapshot here so the orchestrator
+    -- no longer emits a second contradicting frame with chat_locked=false. Mirrors
+    -- run_day_discussion_streaming's terminal emit. Guarded on roles/slot_persona/
+    -- roster_names being supplied because legacy Phase-2 stub callers may invoke
+    -- this function without them; in that case we skip the snapshot (no regression).
+    if roles and slot_persona and roster_names then
+        emit_game_state_changed(game_id, alive, roles, slot_persona,
+            roster_names, player_slot, "vote", round, true)
+    end
     logger:info("[orchestrator] day complete", { round = round, reason = reason })
     return true, nil
 end
