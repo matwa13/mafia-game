@@ -1,0 +1,28 @@
+version: "1.0"
+namespace: app.game
+
+entries:
+  - name: orchestrator
+    kind: process.lua
+    source: file://orchestrator.lua
+    modules:
+      - logger
+      - events
+      - time
+      - sql
+      - env
+    imports:
+      pe: app.lib:events
+      det_rng: app.lib:det_rng
+      sampler: app.npc:sampler
+      persona_pool: app.npc:persona_pool
+      persona: app.npc:persona
+      chat: app.game:chat               # NEW (cut 6, D-02)
+      game_state: app.game:game_state             # NEW (cut 6)
+      dev_telemetry: app.game:dev_telemetry       # NEW (cut 6)
+      night: app.game:night                       # NEW (cut 7)
+      day: app.game:day                           # NEW (cut 7)
+      vote: app.game:vote                         # NEW (cut 7)
+      end_game: app.game:end_game                 # NEW (cut 7)
+      intro: app.game:intro                       # NEW (cut 7)
+    method: run

@@ -1,0 +1,16 @@
+version: "1.0"
+namespace: app.storage.migrations
+
+entries:
+  - name: 0004_night_phase
+    kind: function.lua
+    meta:
+      type: migration
+      target_db: app:db
+      description: "Phase 4: add reasoning_json column to night_actions"
+      depends_on: [ns:wippy.migration, app.storage.migrations:0003_phase3_vote_metadata]
+      timestamp: "2026-04-25T12:00:00Z"
+    source: file://0004_night_phase.lua
+    imports:
+      migration: wippy.migration:migration
+    method: migrate

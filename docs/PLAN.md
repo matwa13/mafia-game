@@ -1,3 +1,3 @@
 # Project Plan
 
-// TODO
+all the documentation is in the `.planning` folder

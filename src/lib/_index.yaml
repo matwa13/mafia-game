@@ -1,0 +1,32 @@
+version: "1.0"
+namespace: app.lib
+
+entries:
+  # publish_event + scope_allowed helpers. D-09 invariant: this file is the
+  # ONLY approved `events.send` call site in the project.
+  - name: events
+    kind: library.lua
+    source: file://events.lua
+    modules:
+      - events
+
+  # Deterministic LCG PRNG for structural setup (role shuffle, persona
+  # pick). Wippy's math.randomseed is empirically a no-op across processes;
+  # det_rng gives D-SD-05 same-seed-same-setup determinism without
+  # depending on the framework RNG.
+  - name: det_rng
+    kind: library.lua
+    source: file://det_rng.lua
+
+  # T-03 (Phase 6): Shared test-harness helpers. Single home for log_ok/
+  # log_fail/log_skip + sql/poll/wait helpers used by both
+  # src/game/test_driver.lua and src/npc/test_driver.lua. Log format
+  # strings (`[TEST] %s OK|FAIL|SKIP`) match Phase 1 D-21.
+  - name: test_harness
+    kind: library.lua
+    source: file://test_harness.lua
+    modules:
+      - logger
+      - time
+      - sql
+      - channel

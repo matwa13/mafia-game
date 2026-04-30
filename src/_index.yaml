@@ -1,0 +1,26 @@
+version: "1.0"
+namespace: app
+entries:
+  # Claude Haiku 4.5 model card — resolved by framework/llm from `meta.name`.
+  # npc_test.lua hardcodes MODEL = "claude-haiku-4-5". Provider dispatch is
+  # delegated to wippy.llm.claude:provider (see .wippy/vendor/wippy/llm/claude/).
+  - name: claude-haiku-4-5
+    kind: registry.entry
+    meta:
+      name: claude-haiku-4-5
+      type: llm.model
+      title: Claude Haiku 4.5
+      comment: Anthropic Claude Haiku 4.5 — fast single-player Mafia NPC model.
+      capabilities:
+        - generate
+        - tool_use
+        - structured_output
+        - caching
+    max_tokens: 200000
+    output_tokens: 8192
+    pricing:
+      input: 1
+      output: 5
+    providers:
+      - id: wippy.llm.claude:provider
+        provider_model: claude-haiku-4-5-20251001

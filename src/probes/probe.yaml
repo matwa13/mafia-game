@@ -1,0 +1,30 @@
+version: "1.0"
+namespace: app.probes
+
+entries:
+  # Main probe process — runs four sequential boot-time primitives checks:
+  # db, events-ordering, registry-xprocess, echo. Each emits exactly one
+  # [PROBE] <name> OK|FAIL: <reason> log line. No DEFERRED branch (D-07).
+  - name: probe
+    kind: process.lua
+    source: file://probe.lua
+    modules:
+      - json
+      - logger
+      - events
+      - sql
+      - time
+      - websocket
+    method: run
+
+  - name: probe_service
+    kind: process.service
+    process: app.probes:probe
+    host: app.processes:host
+    lifecycle:
+      auto_start: true
+      restart:
+        max_attempts: 3
+        initial_delay: 2s
+        max_delay: 15s
+        backoff_factor: 2.0

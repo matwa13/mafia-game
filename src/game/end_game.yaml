@@ -1,0 +1,13 @@
+version: "1.0"
+namespace: app.game
+
+entries:
+  - name: end_game
+    kind: library.lua
+    source: file://end_game.lua
+    modules:
+      - logger
+      - time
+      - sql
+    imports:
+      pe: app.lib:events

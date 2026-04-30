@@ -1,0 +1,18 @@
+version: "1.0"
+namespace: app.game
+
+entries:
+  - name: day
+    kind: library.lua
+    source: file://day.lua
+    modules:
+      - logger
+      - time
+      - sql
+      - channel
+      - json
+    imports:
+      pe: app.lib:events
+      chat: app.game:chat
+      game_state: app.game:game_state
+      dev_telemetry: app.game:dev_telemetry

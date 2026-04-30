@@ -1,0 +1,50 @@
+version: "1.0"
+namespace: app.game
+
+entries:
+  # D-22: MAFIA_DEV_MODE env declaration. env.get() only sees keys that are
+  # registered as env.variable entries against a storage (env.storage.file
+  # .env values are NOT surfaced to env.get() without this declaration).
+  # Both test_driver.lua and orchestrator.lua read this key.
+  - name: mafia_dev_mode
+    kind: env.variable
+    storage: app:env
+    variable: MAFIA_DEV_MODE
+
+  # D-08 (Phase 3): MAFIA_NPC_MODE controls NPC implementation.
+  # "stub" → npc_stub (Phase 2 regression), "real" → npc.lua (Phase 3+, default).
+  - name: mafia_npc_mode
+    kind: env.variable
+    storage: app:env
+    variable: MAFIA_NPC_MODE
+
+  # Phase 6 cut 3: shrunk to Pattern B (run + dispatch). Harness fns moved
+  # to app.lib:test_harness (T-03); V-XX scenarios moved to
+  # app.game.tests:vXX_* (T-02). modules trimmed to what run() actually uses
+  # (logger + channel + env). imports list aliases the test groups + harness.
+  - name: test_driver
+    kind: process.lua
+    source: file://test_driver.lua
+    modules:
+      - logger
+      - channel
+      - env
+    imports:
+      harness: app.lib:test_harness
+      v02: app.game.tests:v02_setup
+      v03: app.game.tests:v03_llm
+      v04: app.game.tests:v04_night
+      v05: app.game.tests:v05_dev
+    method: run
+
+  - name: test_driver_service
+    kind: process.service
+    process: app.game:test_driver
+    host: app.processes:host
+    lifecycle:
+      auto_start: true
+      restart:
+        max_attempts: 3
+        initial_delay: 2s
+        max_delay: 15s
+        backoff_factor: 2.0

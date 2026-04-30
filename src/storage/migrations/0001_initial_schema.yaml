@@ -1,0 +1,16 @@
+version: "1.0"
+namespace: app.storage.migrations
+
+entries:
+  - name: 0001_initial_schema
+    kind: function.lua
+    meta:
+      type: migration
+      target_db: app:db
+      description: Create initial Mafia schema (all 8 tables)
+      depends_on: [ns:wippy.migration]
+      timestamp: "2026-04-21T12:00:00Z"
+    source: file://0001_initial_schema.lua
+    imports:
+      migration: wippy.migration:migration
+    method: migrate

@@ -1,0 +1,35 @@
+version: "1.0"
+namespace: app.game
+
+entries:
+  # D-SD-01: MAFIA_SEED env.variable entry. env.get() only resolves keys
+  # declared here (env.storage.file does NOT auto-surface keys to env.get).
+  - name: mafia_seed
+    kind: env.variable
+    storage: app:env
+    variable: MAFIA_SEED
+
+  - name: game_manager
+    kind: process.lua
+    source: file://game_manager.lua
+    modules:
+      - logger
+      - time
+      - sql
+      - uuid
+      - env
+    imports:
+      pe: app.lib:events
+    method: run
+
+  - name: game_manager_service
+    kind: process.service
+    process: app.game:game_manager
+    host: app.processes:host
+    lifecycle:
+      auto_start: true
+      restart:
+        max_attempts: 3
+        initial_delay: 2s
+        max_delay: 15s
+        backoff_factor: 2.0

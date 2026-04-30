@@ -1,0 +1,9 @@
+version: "1.0"
+namespace: app.http
+
+entries:
+  - name: root
+    kind: http.router
+    meta:
+      server: app.http:server
+    prefix: /

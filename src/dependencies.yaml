@@ -1,0 +1,69 @@
+version: "1.0"
+namespace: app
+
+entries:
+  # Bootloader runs the discovery-and-execute service at order 20
+  # that picks up every `meta.type: migration` entry in the registry
+  # and applies it against the target database.
+  - name: dep.bootloader
+    kind: ns.dependency
+    component: wippy/bootloader
+    version: "*"
+    parameters:
+      - name: application_host
+        value: app.processes:host
+      - name: env_storage
+        value: app:env
+
+  # Binds the `app_db` parameter of the wippy/migration module to our
+  # SQLite database entry so the migration bootloader knows which db
+  # to run 0001_initial_schema against.
+  - name: dep.migration
+    kind: ns.dependency
+    component: wippy/migration
+    version: "*"
+    parameters:
+      - name: app_db
+        value: app:db
+
+  # Binds the wippy/relay module's ns.requirements:
+  #   - application_host → our process.host (central hub + per-user hubs live here)
+  #   - user_security_scope → named scope applied to each spawned user hub
+  #   - env_storage → our writable env storage (shared with bootloader)
+  - name: dep.relay
+    kind: ns.dependency
+    component: wippy/relay
+    version: "*"
+    parameters:
+      - name: application_host
+        value: app.processes:host
+      - name: user_security_scope
+        value: app.security:user
+      - name: env_storage
+        value: app:env
+
+  # Phase 7: dep.llm retained — needed by the legacy Phase 1 harness at
+  # src/npc/npc_test.yaml, which still imports `llm: wippy.llm:llm` and
+  # therefore requires wippy/llm's ns.requirements (process_host + env_storage)
+  # to be wired here for boot-time resolution. All 5 live game-path NPC turn
+  # handlers now route through wippy/agent (dep.agent below); only the legacy
+  # test harness keeps the wippy/llm import.
+  # Binds the wippy/llm module's ns.requirements:
+  #   - process_host → our process.host (Bedrock/Google credential refreshers spawn here)
+  #   - env_storage → our writable env storage (reads ANTHROPIC_API_KEY etc.)
+  - name: dep.llm
+    kind: ns.dependency
+    component: wippy/llm
+    version: "*"
+    parameters:
+      - name: process_host
+        value: app.processes:host
+      - name: env_storage
+        value: app:env
+
+  # Binds the wippy/agent module. No ns.requirements to wire — agent
+  # delegates LLM/env needs to wippy/llm (already wired via dep.llm above).
+  - name: dep.agent
+    kind: ns.dependency
+    component: wippy/agent
+    version: "*"

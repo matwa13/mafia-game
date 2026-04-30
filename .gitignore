@@ -16,3 +16,10 @@ skills-lock.json
 
 .local/
 .planning/
+
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+frontend/node_modules/
+frontend/dist/

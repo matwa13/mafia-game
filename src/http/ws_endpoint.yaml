@@ -1,0 +1,26 @@
+version: "1.0"
+namespace: app.http
+
+entries:
+  # Wraps ws_handler.lua as a function that the endpoint can invoke.
+  - name: ws_handler
+    kind: function.lua
+    source: file://ws_handler.lua
+    method: handler
+    modules:
+      - http
+      - json
+      - env
+
+  # HTTP endpoint on the /ws router.
+  # Matches GET / (which, relative to the router's /ws prefix, is the /ws
+  # URL). Its response carries the X-WS-Relay header consumed by the
+  # websocket_relay post-middleware to route the upgraded WS connection
+  # to the central relay hub.
+  - name: ws_endpoint
+    kind: http.endpoint
+    meta:
+      router: app.http:ws_router
+    method: GET
+    path: /
+    func: app.http:ws_handler

@@ -1,0 +1,62 @@
+version: "1.0"
+namespace: app.game.tests
+
+# Phase 6 cut 3 (T-02): per-phase scenario library group.
+# Multi-level namespace `app.game.tests` is intentional — RESEARCH §"Pitfall 4"
+# + Phase 02 P05 `is_service_id` rule confirm: multi-level namespaces are fine
+# for non-bootloader-required entries (test scenario libraries are imports,
+# not requires). The driver itself stays at `app.game:test_driver`
+# (single-level, registers as `process.service`); only the per-phase libraries
+# are at multi-level.
+
+entries:
+  - name: v02_setup
+    kind: library.lua
+    source: file://v02_setup.lua
+    modules:
+      - logger
+      - time
+      - sql
+      - events
+      - channel
+    imports:
+      harness: app.lib:test_harness
+
+  - name: v03_llm
+    kind: library.lua
+    source: file://v03_llm.lua
+    modules:
+      - logger
+      - time
+      - sql
+      - events
+      - channel
+    imports:
+      harness: app.lib:test_harness
+      sampler: app.npc:sampler
+      persona_pool: app.npc:persona_pool
+
+  - name: v04_night
+    kind: library.lua
+    source: file://v04_night.lua
+    modules:
+      - logger
+      - time
+      - sql
+      - events
+      - channel
+    imports:
+      harness: app.lib:test_harness
+
+  - name: v05_dev
+    kind: library.lua
+    source: file://v05_dev.lua
+    modules:
+      - logger
+      - time
+      - sql
+      - events
+      - channel
+      - env
+    imports:
+      harness: app.lib:test_harness

@@ -1,0 +1,31 @@
+version: "1.0"
+namespace: app.npc
+
+entries:
+  - name: npc
+    kind: process.lua
+    source: file://npc.lua
+    modules:
+      - logger
+      - events
+      - time
+      - sql
+      - json
+      - hash
+    imports:
+      pe: app.lib:events
+      agent_context: wippy.agent:context   # Phase 7 D-04 inline ctx:load_agent for per-NPC runner
+      persona: app.npc:persona
+      prompts: app.npc:prompts
+      turn_chat: app.npc:turn_chat
+      turn_vote: app.npc:turn_vote
+      turn_night_pick: app.npc:turn_night_pick
+      turn_side_chat: app.npc:turn_side_chat
+      turn_last_words: app.npc:turn_last_words
+      errors: app.npc:errors
+      suspicion: app.npc:suspicion
+      event_log: app.npc:event_log
+    method: run
+    # NO process.service — orchestrator spawns per game via process.spawn_linked_monitored.
+    # Phase 6 Cut 5: llm, prompt, visible_context removed from npc.yaml imports — consumed
+    # only by turn_*.lua and prompts.lua which declare them in their own _index.yaml entries.

@@ -1,0 +1,33 @@
+version: "1.0"
+namespace: app.npc
+
+entries:
+  - name: npc_test
+    kind: process.lua
+    source: file://npc_test.lua
+    modules:
+      - logger
+      - events
+      - time
+      - sql
+      - json
+      - hash
+    imports:
+      llm: wippy.llm:llm
+      prompt: wippy.llm:prompt
+      pe: app.lib:events
+      persona: app.npc:persona
+      visible_context: app.npc:visible_context
+    method: run
+
+  - name: npc_test_service
+    kind: process.service
+    process: app.npc:npc_test
+    host: app.processes:host
+    lifecycle:
+      auto_start: true
+      restart:
+        max_attempts: 5
+        initial_delay: 2s
+        max_delay: 15s
+        backoff_factor: 2.0

@@ -1,0 +1,24 @@
+version: "1.0"
+namespace: app.npc.tests
+
+# Phase 6 cut 4 (T-04): per-phase scenario library group, mirrors
+# src/game/tests/_index.yaml from cut 3. Multi-level namespace
+# `app.npc.tests` is intentional — RESEARCH §"Pitfall 4" + Phase 02 P05
+# `is_service_id` rule confirm: multi-level namespaces are fine for
+# non-bootloader-required entries (test scenario libraries are imports,
+# not requires). The driver itself stays at `app.npc:test_driver`
+# (single-level, registers as `process.service`); only the per-phase
+# library is at multi-level.
+
+entries:
+  - name: v01_setup
+    kind: library.lua
+    source: file://v01_setup.lua
+    modules:
+      - logger
+      - time
+      - sql
+      - env
+      - channel
+    imports:
+      harness: app.lib:test_harness
